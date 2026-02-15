@@ -71,7 +71,10 @@ class TradingEngine:
         """Initialize all components."""
         Config.print_status()
         await self.db.init()
-        await self.bot.setup()
+        if Config.TELEGRAM_BOT_TOKEN:
+            await self.bot.setup()
+        else:
+            print("⚠️ No TELEGRAM_BOT_TOKEN — running without Telegram")
         print("✅ All components initialized")
 
     async def start(self):
@@ -218,15 +221,15 @@ async def main():
     await engine.init()
 
     # Run telegram bot
-    if Config.TELEGRAM_BOT_TOKEN:
+    if engine.bot.app:
         print("🤖 Starting Telegram bot...")
-        # Initialize and start polling
         await engine.bot.app.initialize()
         await engine.bot.app.start()
         await engine.bot.app.updater.start_polling(drop_pending_updates=True)
         print("✅ Telegram bot is running!")
     else:
-        print("⚠️ No TELEGRAM_BOT_TOKEN — running without Telegram")
+        print("⚠️ No Telegram — auto-starting trading loop...")
+        await engine.start()
 
     # Auto-start trading if configured
     print("\n💡 Send /trade in Telegram to start, or press Ctrl+C to quit\n")
@@ -252,9 +255,12 @@ async def main():
     finally:
         await engine.stop()
         if engine.bot.app:
-            await engine.bot.app.updater.stop()
-            await engine.bot.app.stop()
-            await engine.bot.app.shutdown()
+            try:
+                await engine.bot.app.updater.stop()
+                await engine.bot.app.stop()
+                await engine.bot.app.shutdown()
+            except Exception:
+                pass
         print("👋 Goodbye!")
 
 
