@@ -69,6 +69,7 @@ class GammaClient:
             return self._filter(self._cache, coins, timeframes)
 
         all_parsed = []
+        _logged_sample = False
 
         # ── Strategy 1: Fetch events and filter by slug pattern ──
         events = self._fetch_events()
@@ -83,9 +84,29 @@ class GammaClient:
                 tf = int(slug_match.group('tf'))
                 markets_in_event = event.get('markets', [])
 
+                # Log first event's market structure for debugging
+                if not _logged_sample and markets_in_event:
+                    m0 = markets_in_event[0]
+                    print(f"🔬 Sample market fields: {list(m0.keys())[:15]}", flush=True)
+                    print(f"   tokens: {len(m0.get('tokens', []))} | "
+                          f"clobTokenIds: {bool(m0.get('clobTokenIds'))} | "
+                          f"outcomePrices: {bool(m0.get('outcomePrices'))}", flush=True)
+                    _logged_sample = True
+
                 for market in markets_in_event:
                     parsed = self._parse_event_market(market, coin, tf, title, slug)
                     if parsed:
+                        # If no token IDs, fetch full market data
+                        if not parsed['up_token_id'] or not parsed['down_token_id']:
+                            market_id = parsed['market_id']
+                            if market_id:
+                                full = self._fetch_single_market(market_id)
+                                if full:
+                                    enriched = self._parse_event_market(
+                                        full, coin, tf, title, slug
+                                    )
+                                    if enriched and enriched['up_token_id']:
+                                        parsed = enriched
                         all_parsed.append(parsed)
                 continue
 
@@ -126,7 +147,9 @@ class GammaClient:
         if all_parsed:
             coins_found = set(m['coin'] for m in all_parsed)
             tfs_found = set(m['timeframe'] for m in all_parsed)
-            print(f"📡 Found {len(all_parsed)} crypto markets: {coins_found} × {tfs_found}min", flush=True)
+            with_tokens = sum(1 for m in all_parsed if m.get('up_token_id'))
+            print(f"📡 Found {len(all_parsed)} crypto markets ({with_tokens} with token IDs): "
+                  f"{coins_found} × {tfs_found}min", flush=True)
         else:
             print("⚠️ No crypto Up/Down markets found on Polymarket right now", flush=True)
 
@@ -145,13 +168,29 @@ class GammaClient:
 
     def get_market_by_id(self, market_id: str) -> Optional[Dict]:
         """Fetch a specific market by its ID."""
+        return self._fetch_single_market(market_id)
+
+    def _fetch_single_market(self, market_id: str) -> Optional[Dict]:
+        """Fetch full market data for a single market by condition_id or id."""
         try:
+            # Try by condition_id first, then by id
+            for param in ['condition_id', 'id']:
+                url = f"{self.base_url}/markets?{param}={market_id}&closed=false"
+                resp = self.session.get(url, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list) and data:
+                        return data[0]
+                    elif isinstance(data, dict) and data:
+                        return data
+
+            # Direct fetch
             url = f"{self.base_url}/markets/{market_id}"
             resp = self.session.get(url, timeout=10)
             if resp.status_code == 200:
                 return resp.json()
         except Exception as e:
-            print(f"❌ Error fetching market {market_id}: {e}", flush=True)
+            pass  # Silent — called per market, would spam
         return None
 
     # ═══════════════════════════════════════════════════════════════════

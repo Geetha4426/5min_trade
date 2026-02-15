@@ -120,18 +120,23 @@ class TradingEngine:
 
                 if token_ids:
                     await self.poly_feed.subscribe(token_ids)
-                    # Run for one cycle, then re-discover
+                    print(f"🔌 Subscribing to {len(token_ids)} token feeds", flush=True)
                     try:
                         await asyncio.wait_for(self.poly_feed.run(), timeout=60)
                     except asyncio.TimeoutError:
                         pass
                 else:
-                    print("⚠️ No markets found, retrying in 30s...")
+                    # Markets found but no token IDs — this is normal for events
+                    # The scan loop still works without WS prices
+                    if markets:
+                        print(f"📡 {len(markets)} markets found but no token IDs for WS — using REST data", flush=True)
+                    else:
+                        print("⚠️ No markets found for WS subscription", flush=True)
                     await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"❌ Poly feed error: {e}")
+                print(f"❌ Poly feed error: {e}", flush=True)
                 await asyncio.sleep(10)
 
     async def _scan_loop(self):
@@ -170,6 +175,11 @@ class TradingEngine:
                         break
 
                     seconds_remaining = self.gamma.get_seconds_remaining(market)
+
+                    # Skip expired markets
+                    if seconds_remaining <= 0:
+                        continue
+
                     context = {
                         'clob': self.clob,
                         'poly_feed': self.poly_feed,
@@ -178,15 +188,29 @@ class TradingEngine:
                     }
 
                     # Dynamic picker gets balance preferences
-                    if hasattr(strategy, 'analyze') and self.active_strategy == 'dynamic':
-                        signal = await strategy.analyze(market, context, balance_prefs)
-                    else:
-                        signal = await strategy.analyze(market, context)
+                    try:
+                        if hasattr(strategy, 'analyze') and self.active_strategy == 'dynamic':
+                            signal = await strategy.analyze(market, context, balance_prefs)
+                        else:
+                            signal = await strategy.analyze(market, context)
+                    except Exception as e:
+                        if scan_count <= 3:
+                            print(f"❌ Strategy error on {market.get('coin','?')}: {e}", flush=True)
+                        continue
 
                     if signal:
+                        print(f"🎯 Signal: {signal.strategy} → {market.get('coin','?')} "
+                              f"{signal.direction} @ {signal.entry_price:.4f} "
+                              f"(conf={signal.confidence:.0%})", flush=True)
                         trade = await self.paper_trader.execute_signal(signal)
                         if trade:
                             await self.bot.send_trade_alert(trade)
+                            print(f"✅ Trade executed: {trade.get('coin','?')} {trade.get('direction','?')}", flush=True)
+
+                # Log how many markets were scanned
+                if scan_count <= 5 or scan_count % 100 == 0:
+                    active_markets = [m for m in markets if self.gamma.get_seconds_remaining(m) > 0]
+                    print(f"🔍 Scan #{scan_count}: {len(active_markets)}/{len(markets)} active markets scanned", flush=True)
 
                 # Check open positions with dynamic hold/sell
                 current_prices = {}
