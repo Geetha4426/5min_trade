@@ -261,18 +261,75 @@ class GammaClient:
     # PARSE METHODS
     # ═══════════════════════════════════════════════════════════════════
 
+    _first_parse_logged = False
+
     def _parse_event_market(self, market: Dict, coin: str, timeframe: int,
                              event_title: str, event_slug: str) -> Optional[Dict]:
         """Parse a market that's nested inside an event."""
+        import json as _json
+
         tokens = market.get('tokens', [])
         clob_ids_raw = market.get('clobTokenIds', '')
+        outcomes_raw = market.get('outcomes', '')
+        prices_raw = market.get('outcomePrices', '')
+
+        # Debug: log first market's raw values
+        if not GammaClient._first_parse_logged:
+            GammaClient._first_parse_logged = True
+            print(f"🔬 RAW PARSE DEBUG:", flush=True)
+            print(f"   all keys: {list(market.keys())}", flush=True)
+            print(f"   clobTokenIds type={type(clob_ids_raw).__name__} val={str(clob_ids_raw)[:120]}", flush=True)
+            print(f"   outcomes type={type(outcomes_raw).__name__} val={str(outcomes_raw)[:80]}", flush=True)
+            print(f"   outcomePrices type={type(prices_raw).__name__} val={str(prices_raw)[:80]}", flush=True)
+            print(f"   tokens count={len(tokens)}", flush=True)
 
         up_token = None
         down_token = None
         up_price = 0.5
         down_price = 0.5
 
-        # Parse tokens (outcomes: Up/Down or Yes/No)
+        # ── Parse clobTokenIds (the main source for token IDs) ──
+        clob_ids = []
+        if clob_ids_raw:
+            try:
+                if isinstance(clob_ids_raw, str):
+                    clob_ids = _json.loads(clob_ids_raw)
+                elif isinstance(clob_ids_raw, list):
+                    clob_ids = clob_ids_raw
+            except (ValueError, TypeError):
+                # Try manual parsing as last resort
+                try:
+                    cleaned = clob_ids_raw.strip()
+                    if cleaned.startswith('['):
+                        cleaned = cleaned[1:-1]
+                    clob_ids = [s.strip().strip('"').strip("'") for s in cleaned.split(',') if s.strip()]
+                except Exception:
+                    pass
+
+        # ── Parse outcomes (e.g. ["Up", "Down"]) ──
+        outcomes = []
+        if outcomes_raw:
+            try:
+                if isinstance(outcomes_raw, str):
+                    outcomes = _json.loads(outcomes_raw)
+                elif isinstance(outcomes_raw, list):
+                    outcomes = outcomes_raw
+            except (ValueError, TypeError):
+                pass
+
+        # ── Parse outcomePrices ──
+        prices = []
+        if prices_raw:
+            try:
+                if isinstance(prices_raw, str):
+                    prices = _json.loads(prices_raw)
+                elif isinstance(prices_raw, list):
+                    prices = prices_raw
+                prices = [float(p) for p in prices]
+            except (ValueError, TypeError):
+                pass
+
+        # ── Method 1: Use tokens array if available ──
         if tokens and len(tokens) >= 2:
             for token in tokens:
                 outcome = token.get('outcome', '').lower()
@@ -283,33 +340,29 @@ class GammaClient:
                     down_token = token.get('token_id', '')
                     down_price = float(token.get('price', 0.5) or 0.5)
 
-        # Fallback: clobTokenIds
-        if not up_token and clob_ids_raw:
-            try:
-                if isinstance(clob_ids_raw, str):
-                    ids = clob_ids_raw.strip('[]"').split('","')
-                else:
-                    ids = list(clob_ids_raw)
-                if len(ids) >= 2:
-                    up_token = ids[0]
-                    down_token = ids[1]
-            except Exception:
-                pass
+        # ── Method 2: Map clobTokenIds + outcomes ──
+        if not up_token and clob_ids and len(clob_ids) >= 2:
+            if outcomes and len(outcomes) >= 2:
+                # Map by outcome name
+                for i, outcome in enumerate(outcomes):
+                    outcome_lower = outcome.lower() if isinstance(outcome, str) else ''
+                    if 'up' in outcome_lower or 'yes' in outcome_lower:
+                        up_token = clob_ids[i]
+                        if prices and len(prices) > i:
+                            up_price = prices[i]
+                    elif 'down' in outcome_lower or 'no' in outcome_lower:
+                        down_token = clob_ids[i]
+                        if prices and len(prices) > i:
+                            down_price = prices[i]
+            else:
+                # No outcomes field — assume first=Up, second=Down
+                up_token = clob_ids[0]
+                down_token = clob_ids[1]
 
-        # Parse prices from outcomePrices
-        if up_price == 0.5:
-            prices_raw = market.get('outcomePrices', '')
-            if prices_raw:
-                try:
-                    if isinstance(prices_raw, str):
-                        prices = prices_raw.strip('[]"').split('","')
-                    else:
-                        prices = list(prices_raw)
-                    if len(prices) >= 2:
-                        up_price = float(prices[0])
-                        down_price = float(prices[1])
-                except Exception:
-                    pass
+        # ── Parse prices if still default ──
+        if up_price == 0.5 and prices and len(prices) >= 2:
+            up_price = prices[0]
+            down_price = prices[1]
 
         return {
             'coin': coin,
