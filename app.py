@@ -8,6 +8,7 @@ The trading engine scans markets, runs strategies, and executes paper trades.
 import asyncio
 import sys
 import signal
+import time
 
 from config import Config
 from data.gamma_client import GammaClient
@@ -143,6 +144,7 @@ class TradingEngine:
         """Main trading loop — CONTINUOUS. Scans all markets, runs all strategies."""
         print("🔄 Continuous scan loop started")
         scan_count = 0
+        _last_pnl_report = time.time()
 
         while self.is_running:
             try:
@@ -242,6 +244,18 @@ class TradingEngine:
                 # Scan interval from config
                 min_tf = min(self.active_timeframes) if self.active_timeframes else 15
                 interval = Config.get_timeframe_params(min_tf).get('scan_interval', 2)
+
+                # Periodic PnL report every 10 minutes
+                if time.time() - _last_pnl_report >= 600:
+                    _last_pnl_report = time.time()
+                    summary = self.paper_trader.get_summary()
+                    open_pos = self.paper_trader.get_open_positions()
+                    print(f"📊 PnL Report | Balance: ${summary.get('balance', 0):.2f} | "
+                          f"Trades: {summary.get('total_trades', 0)} | "
+                          f"Win: {summary.get('win_rate', 0):.0f}% | "
+                          f"Open: {len(open_pos)}", flush=True)
+                    await self.bot.send_pnl_report(summary, open_pos)
+
                 await asyncio.sleep(interval)
 
             except asyncio.CancelledError:

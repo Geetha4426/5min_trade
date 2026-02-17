@@ -153,6 +153,11 @@ class StraddleStrategy(BaseStrategy):
 
         combined = up_ask + down_ask
 
+        # CRITICAL: if combined >= $0.95, this is a guaranteed loss
+        # Both sides together pay out exactly $1.00 at settlement
+        if combined >= 0.95:
+            return None
+
         # Check for volatility: are prices swinging?
         volatility = 0
         if poly_feed:

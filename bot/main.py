@@ -355,19 +355,18 @@ class TelegramBot:
 
         emoji = '📈' if trade['direction'] == 'UP' else '📉'
         text = (
-            f"{emoji} **NEW TRADE**\n\n"
+            f"{emoji} NEW TRADE\n\n"
             f"Strategy: {trade['strategy']}\n"
             f"Coin: {trade['coin']} {trade['direction']}\n"
             f"Entry: ${trade['entry_price']:.4f}\n"
             f"Size: ${trade['size_usd']:.2f}\n"
             f"Confidence: {trade['confidence']:.0%}\n\n"
-            f"_{trade.get('rationale', '')}_"
+            f"{trade.get('rationale', '')}"
         )
         try:
             await self.app.bot.send_message(
                 chat_id=Config.TELEGRAM_CHAT_ID,
                 text=text,
-                parse_mode='Markdown'
             )
         except Exception as e:
             print(f"❌ Telegram alert error: {e}")
@@ -380,18 +379,51 @@ class TelegramBot:
         pnl = trade.get('pnl', 0) or 0
         emoji = '✅' if pnl > 0 else '❌'
         text = (
-            f"{emoji} **TRADE CLOSED**\n\n"
+            f"{emoji} TRADE CLOSED\n\n"
             f"{trade['coin']} {trade['direction']}\n"
-            f"Entry: ${trade['entry_price']:.4f} → "
+            f"Entry: ${trade['entry_price']:.4f} -> "
             f"Exit: ${trade.get('exit_price', 0):.4f}\n"
-            f"P&L: ${pnl:+.2f} ({trade.get('pnl_pct', 0):+.1f}%)\n"
+            f"PnL: ${pnl:+.2f} ({trade.get('pnl_pct', 0):+.1f}%)\n"
             f"Reason: {trade.get('exit_reason', 'unknown')}"
         )
         try:
             await self.app.bot.send_message(
                 chat_id=Config.TELEGRAM_CHAT_ID,
                 text=text,
-                parse_mode='Markdown'
             )
         except Exception as e:
             print(f"❌ Telegram alert error: {e}")
+
+    async def send_pnl_report(self, summary: dict, open_positions: list):
+        """Send periodic PnL report."""
+        if not Config.TELEGRAM_CHAT_ID or not self.app:
+            return
+
+        pos_lines = []
+        for p in open_positions[:10]:
+            entry = p.get('entry_price', 0)
+            coin = p.get('coin', '?')
+            direction = p.get('direction', '?')
+            strategy = p.get('strategy', '?')
+            size = p.get('size_usd', 0)
+            pos_lines.append(f"  {coin} {direction} @${entry:.3f} (${size:.2f}) [{strategy}]")
+
+        positions_text = '\n'.join(pos_lines) if pos_lines else '  No open positions'
+
+        text = (
+            f"📊 PnL REPORT\n\n"
+            f"Balance: ${summary.get('balance', 0):.2f}\n"
+            f"Tier: {summary.get('tier_emoji', '')} {summary.get('tier', '')}\n"
+            f"Total Trades: {summary.get('total_trades', 0)}\n"
+            f"Win Rate: {summary.get('win_rate', 0):.0f}%\n"
+            f"Total PnL: ${summary.get('total_pnl', 0):+.2f}\n"
+            f"Open Positions: {summary.get('open_count', 0)}\n\n"
+            f"Positions:\n{positions_text}"
+        )
+        try:
+            await self.app.bot.send_message(
+                chat_id=Config.TELEGRAM_CHAT_ID,
+                text=text,
+            )
+        except Exception as e:
+            print(f"❌ PnL report error: {e}")
