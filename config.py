@@ -36,6 +36,7 @@ class Config:
     CLOB_API_URL = 'https://clob.polymarket.com'
     BINANCE_WS_URL = 'wss://stream.binance.com:9443/ws'
     POLYMARKET_WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market'
+    POLYMARKET_LIVE_WS_URL = 'wss://ws-live-data.polymarket.com'
 
     # ═══════════════════════════════════════════════════════════════════
     # TRADING MODE
@@ -54,6 +55,18 @@ class Config:
         'ETH': 'ethusdt',
         'SOL': 'solusdt',
         'XRP': 'xrpusdt',
+    }
+
+    # Polymarket slug prefixes per coin (for slug computation)
+    COIN_PM = {
+        'BTC': 'btc', 'ETH': 'eth', 'SOL': 'sol', 'XRP': 'xrp',
+    }
+
+    # Polymarket series slugs per timeframe (for series_id discovery)
+    SERIES_SLUGS = {
+        5: '{coin}-up-or-down-5m',    # e.g. btc-up-or-down-5m
+        15: '{coin}-up-or-down-15m',
+        30: '{coin}-up-or-down-30m',
     }
 
     # ═══════════════════════════════════════════════════════════════════

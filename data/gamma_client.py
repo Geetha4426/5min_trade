@@ -199,13 +199,73 @@ class GammaClient:
 
     def _fetch_events(self) -> List[Dict]:
         """
-        Fetch active events from the /events endpoint.
-        This is where 5m/15m/30m crypto Up/Down markets live.
+        Fetch active crypto Up/Down events using fast discovery methods.
+        
+        Strategy 1 (fastest): Compute exact slug from current timestamp
+        Strategy 2 (fallback): Use series_slug for broader discovery
+        Strategy 3 (last resort): Page through all events
         """
         all_events = []
+        now_ts = int(time.time())
 
-        # Fetch multiple pages of active events (newest first)
-        for offset in range(0, 600, 100):
+        # ═══ Strategy 1: Direct slug lookup (st1ne method) ═══
+        # Compute the exact slug for each coin/timeframe from UTC timestamp
+        for coin in Config.ENABLED_COINS:
+            coin_slug = Config.COIN_PM.get(coin, coin.lower())
+            for tf in Config.ENABLED_TIMEFRAMES:
+                # Compute current market epoch: round down to nearest {tf}min boundary
+                interval_secs = tf * 60
+                epoch = (now_ts // interval_secs) * interval_secs
+                # Try current and previous window (in case we're between markets)
+                for ts in [epoch, epoch - interval_secs]:
+                    slug = f"{coin_slug}-updown-{tf}m-{ts}"
+                    try:
+                        url = (
+                            f"{self.base_url}/events"
+                            f"?slug={slug}&limit=1"
+                        )
+                        resp = self.session.get(url, timeout=8)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data and isinstance(data, list):
+                                all_events.extend(data)
+                    except Exception:
+                        pass
+
+        if all_events:
+            unique_slugs = set(e.get('slug', '') for e in all_events)
+            print(f"🎯 Direct slug lookup: found {len(all_events)} events ({', '.join(list(unique_slugs)[:3])})", flush=True)
+            return all_events
+
+        # ═══ Strategy 2: Series slug lookup (FrondEnt method) ═══
+        for coin in Config.ENABLED_COINS:
+            coin_slug = Config.COIN_PM.get(coin, coin.lower())
+            for tf in Config.ENABLED_TIMEFRAMES:
+                series_slug_template = Config.SERIES_SLUGS.get(tf)
+                if not series_slug_template:
+                    continue
+                series_slug = series_slug_template.replace('{coin}', coin_slug)
+                try:
+                    url = (
+                        f"{self.base_url}/events"
+                        f"?series_slug={series_slug}"
+                        f"&active=true&closed=false&limit=10"
+                    )
+                    resp = self.session.get(url, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and isinstance(data, list):
+                            all_events.extend(data)
+                except Exception:
+                    pass
+
+        if all_events:
+            print(f"📡 Series slug lookup: found {len(all_events)} events", flush=True)
+            return all_events
+
+        # ═══ Strategy 3: Broad search (much slower, last resort) ═══
+        print("🔍 Slug/series lookup failed, falling back to broad search...", flush=True)
+        for offset in range(0, 300, 100):
             try:
                 url = (
                     f"{self.base_url}/events"
@@ -215,35 +275,24 @@ class GammaClient:
                 )
                 resp = self.session.get(url, timeout=20)
                 if resp.status_code != 200:
-                    print(f"⚠️ Events API returned {resp.status_code}", flush=True)
                     break
                 data = resp.json()
                 if not data:
                     break
                 all_events.extend(data)
 
-                # Count how many have 'updown' in slug — stop early if we have enough
+                # Count updown events — stop early if we have enough
                 updown_count = sum(1 for e in all_events if 'updown' in e.get('slug', ''))
-                if updown_count >= 20:  # We have plenty
+                if updown_count >= 10:
                     break
-
                 if len(data) < 100:
                     break
-
             except Exception as e:
                 print(f"❌ Error fetching events (offset={offset}): {e}", flush=True)
                 break
 
-        # Log discovery info
         updown_events = [e for e in all_events if 'updown' in e.get('slug', '')]
-        print(
-            f"📊 Fetched {len(all_events)} events, "
-            f"{len(updown_events)} are crypto Up/Down",
-            flush=True
-        )
-        for e in updown_events[:5]:
-            print(f"   → {e.get('slug', '?')} | {e.get('title', '?')[:60]}", flush=True)
-
+        print(f"📊 Broad search: {len(all_events)} events, {len(updown_events)} crypto Up/Down", flush=True)
         return all_events
 
     def _fetch_markets_direct(self) -> List[Dict]:
