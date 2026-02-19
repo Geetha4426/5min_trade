@@ -117,6 +117,14 @@ class TradingEngine:
         if live_ok:
             print(f"🟢 Live trader ready — Mode: {self.live_balance_mgr.mode.emoji} "
                   f"{self.live_balance_mgr.mode.name}", flush=True)
+
+            # Sync balance manager with REAL Polymarket balance
+            real_bal = await self.live_trader.fetch_balance()
+            if real_bal is not None and real_bal > 0:
+                self.live_balance_mgr.update_balance(real_bal)
+                print(f"💰 Balance synced: ${real_bal:.2f} (real)", flush=True)
+            else:
+                print(f"⚠️ Using configured balance: ${self.live_balance_mgr.balance:.2f}", flush=True)
         else:
             print("📋 Paper trading only (no live credentials)", flush=True)
             self.trading_mode = 'paper'
@@ -362,17 +370,28 @@ async def main():
         # Send startup notification to Telegram
         if Config.TELEGRAM_CHAT_ID:
             try:
-                stats = engine.risk_manager.get_stats()
-                mode = "PAPER" if Config.is_paper() else "LIVE"
+                is_live = engine.trading_mode == 'live'
+                mode = "🔴 LIVE" if is_live else "📋 PAPER"
+
+                if is_live:
+                    bal = engine.live_balance_mgr.balance
+                    m = engine.live_balance_mgr.mode
+                    bal_line = f"Balance: ${bal:.2f}\nRisk: {m.emoji} {m.name}\n"
+                else:
+                    stats = engine.risk_manager.get_stats()
+                    bal_line = (
+                        f"Balance: ${stats['balance']:.2f}\n"
+                        f"Tier: {stats.get('tier_emoji','')} {stats.get('tier','')}\n"
+                    )
+
                 msg = (
                     f"🟢 *5MIN_TRADE is ONLINE*\n\n"
                     f"Mode: {mode}\n"
-                    f"Balance: ${stats['balance']:.2f}\n"
-                    f"Tier: {stats.get('tier_emoji','')} {stats.get('tier','')}\n"
-                    f"Strategies: 9 loaded\n"
+                    f"{bal_line}"
+                    f"Strategies: 11 loaded\n"
                     f"Coins: {', '.join(Config.ENABLED_COINS)}\n\n"
                     f"Type /trade to start trading!\n"
-                    f"Type /status to see positions."
+                    f"Type /seed 1 for $1 arb-only mode."
                 )
                 await engine.bot.app.bot.send_message(
                     chat_id=Config.TELEGRAM_CHAT_ID,

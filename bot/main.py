@@ -102,13 +102,22 @@ class TelegramBot:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Welcome message."""
-        mode = "📋 PAPER" if Config.is_paper() else "🔴 LIVE"
+        is_live = self.engine and self.engine.trading_mode == 'live'
+        mode = "🔴 LIVE" if is_live else "📋 PAPER"
         trading = "✅ Running" if (self.engine and self.engine.is_running) else "⏹️ Stopped"
-        balance = self.engine.paper_trader.risk.balance if self.engine else Config.STARTING_BALANCE
+
+        if is_live:
+            balance = self.engine.live_balance_mgr.balance
+            m = self.engine.live_balance_mgr.mode
+            risk_line = f"Risk: {m.emoji} {m.name}\n"
+        else:
+            balance = self.engine.paper_trader.risk.balance if self.engine else Config.STARTING_BALANCE
+            risk_line = ""
 
         text = (
             f"⚡ *5MIN_TRADE — Polymarket Crypto Scalper*\n\n"
             f"Mode: {mode}\n"
+            f"{risk_line}"
             f"Status: {trading}\n"
             f"Balance: ${balance:.2f}\n"
             f"Coins: {', '.join(Config.ENABLED_COINS)}\n"
@@ -553,10 +562,20 @@ class TelegramBot:
             self.engine.active_timeframes = timeframes
             await self.engine.start()
 
+        # Use runtime trading_mode, NOT Config.is_paper()
+        is_live = self.engine and self.engine.trading_mode == 'live'
+        mode_tag = '🔴 LIVE' if is_live else '📋 Paper'
+
+        extra = ''
+        if is_live:
+            m = self.engine.live_balance_mgr.mode
+            bal = self.engine.live_balance_mgr.balance
+            extra = f"\nRisk: {m.emoji} {m.name}\nBalance: ${bal:.2f}"
+
         await query.edit_message_text(
             f"▶️ Trading started on: **{', '.join(f'{t}min' for t in timeframes)}**\n\n"
             f"Strategy: ⚡ Dynamic (auto-select)\n"
-            f"Mode: {'📋 Paper' if Config.is_paper() else '🔴 Live'}",
+            f"Mode: {mode_tag}{extra}",
             parse_mode='Markdown'
         )
 
