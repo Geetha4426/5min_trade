@@ -57,6 +57,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("risk", self.cmd_risk))
         self.app.add_handler(CommandHandler("positions", self.cmd_positions))
         self.app.add_handler(CommandHandler("estop", self.cmd_estop))
+        self.app.add_handler(CommandHandler("seed", self.cmd_seed))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -81,6 +82,7 @@ class TelegramBot:
                 BotCommand("strategy", "View/change strategy"),
                 BotCommand("markets", "Scan live markets"),
                 BotCommand("estop", "Emergency stop"),
+                BotCommand("seed", "$1 start — arb-only seed mode"),
                 BotCommand("history", "Trade history"),
                 BotCommand("settings", "Bot settings"),
             ])
@@ -374,6 +376,61 @@ class TelegramBot:
             text, reply_markup=InlineKeyboardMarkup(buttons)
         )
 
+    async def cmd_seed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Activate SEED mode — designed for $1 starts.
+        Usage: /seed [amount] — e.g., /seed 1, /seed 2.50
+        """
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not initialized")
+            return
+
+        # Parse optional starting balance
+        args = context.args
+        starting_balance = 1.0  # Default $1
+        if args:
+            try:
+                starting_balance = float(args[0])
+                if starting_balance < 0.50:
+                    await update.message.reply_text("❌ Minimum starting balance is $0.50")
+                    return
+                if starting_balance > 100:
+                    await update.message.reply_text(
+                        "💡 With $100+ you should use /risk concentration or medium instead."
+                    )
+                    return
+            except ValueError:
+                await update.message.reply_text("❌ Usage: /seed [amount]\nExample: /seed 1")
+                return
+
+        # Set seed mode and update balance
+        self.engine.live_balance_mgr.update_balance(starting_balance)
+        ok = self.engine.live_balance_mgr.set_mode('seed')
+
+        if ok:
+            from trading.live_balance_manager import SEED_GRADUATE_BALANCE
+            msg = (
+                f"🌱 SEED MODE ACTIVATED\n\n"
+                f"💰 Starting balance: ${starting_balance:.2f}\n"
+                f"🎯 Goal: Grow to ${SEED_GRADUATE_BALANCE:.2f}\n\n"
+                f"📋 Rules:\n"
+                f"• Only guaranteed-profit strategies (arb-only)\n"
+                f"• 90%+ confidence required\n"
+                f"• 1 position at a time (focused)\n"
+                f"• Zero reserve — every cent works for you\n"
+                f"• Auto-upgrades to 🎯 CONCENTRATION at ${SEED_GRADUATE_BALANCE:.2f}\n\n"
+                f"Strategies active:\n"
+                f"  ✅ YES+NO Arb (guaranteed)\n"
+                f"  ✅ Cross-Timeframe Arb (guaranteed)\n"
+                f"  ✅ Oracle Arb (high-confidence)\n"
+                f"  ❌ Everything else (too risky)\n\n"
+                f"Start trading with /trade"
+            )
+        else:
+            msg = "❌ Failed to set seed mode"
+
+        await update.message.reply_text(msg)
+
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show detailed open positions."""
         if not self.engine:
@@ -567,6 +624,17 @@ class TelegramBot:
     # ═══════════════════════════════════════════════════════════════════
     # NOTIFICATIONS
     # ═══════════════════════════════════════════════════════════════════
+
+    async def send_message(self, text: str):
+        """Send a general message to the configured chat."""
+        if not Config.TELEGRAM_CHAT_ID or not self.app:
+            return
+        try:
+            await self.app.bot.send_message(
+                chat_id=Config.TELEGRAM_CHAT_ID, text=text,
+            )
+        except Exception as e:
+            print(f"❌ Telegram send error: {e}")
 
     async def send_trade_alert(self, trade: dict):
         """Send trade execution notification."""

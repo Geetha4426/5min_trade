@@ -105,7 +105,7 @@ class TradingEngine:
         if self.live_balance_mgr.set_mode(risk_mode):
             m = self.live_balance_mgr.mode
             return True, f'{m.emoji} {m.name}: {m.description}'
-        return False, f'Unknown risk mode: {risk_mode}. Use: concentration, medium, aggressive'
+        return False, f'Unknown risk mode: {risk_mode}. Use: seed, concentration, medium, aggressive'
 
     async def init(self):
         """Initialize all components."""
@@ -273,6 +273,12 @@ class TradingEngine:
                         if trade:
                             await self.bot.send_trade_alert(trade)
                             print(f"✅ Trade executed: {trade.get('coin','?')} {trade.get('direction','?')}", flush=True)
+
+                            # Check seed mode auto-graduation
+                            grad_msg = self.live_balance_mgr.check_auto_graduate()
+                            if grad_msg:
+                                print(f"🎉 {grad_msg}", flush=True)
+                                await self.bot.send_message(grad_msg)
 
                 # Log how many markets were scanned
                 if scan_count <= 5 or scan_count % 100 == 0:

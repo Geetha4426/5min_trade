@@ -36,6 +36,17 @@ class LiveRiskMode:
 # ═══════════════════════════════════════════════════════════════════
 
 LIVE_MODES = {
+    'seed': LiveRiskMode(
+        name='SEED',
+        emoji='🌱',
+        max_bet_pct=100.0,      # Can bet 100% — we only trade guaranteed arbs
+        reserve_pct=0.0,        # Zero reserve — every cent counts at $1
+        reserve_min=0.0,        # No minimum reserve
+        max_pos_per_dollar=1.0, # 1 position per $1
+        max_positions_cap=1,    # Only 1 position at a time (focus)
+        min_confidence=0.90,    # ONLY near-guaranteed trades
+        description='$1 start — near-zero risk, arb-only until $5',
+    ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
         emoji='🎯',
@@ -70,6 +81,9 @@ LIVE_MODES = {
         description='Full compound — maximum growth, higher risk',
     ),
 }
+
+# Auto-graduation thresholds for seed mode
+SEED_GRADUATE_BALANCE = 5.0  # Graduate to concentration at $5
 
 
 class LiveBalanceManager:
@@ -152,12 +166,34 @@ class LiveBalanceManager:
 
         return round(size, 2)
 
+    def check_auto_graduate(self) -> str:
+        """
+        Check if seed mode should auto-graduate to concentration.
+        Returns message if graduated, empty string if not.
+        """
+        if self.mode_name == 'seed' and self.balance >= SEED_GRADUATE_BALANCE:
+            self.set_mode('concentration')
+            return (
+                f"🎉 GRADUATED! Balance ${self.balance:.2f} reached ${SEED_GRADUATE_BALANCE:.2f}\n"
+                f"Auto-switched to 🎯 CONCENTRATION mode for safer growth."
+            )
+        return ''
+
     def get_strategy_filter(self) -> Dict:
         """Which strategies are enabled at this mode."""
-        if self.mode_name == 'concentration':
+        if self.mode_name == 'seed':
+            # SEED MODE: Only guaranteed-profit strategies
+            return {
+                'enabled': ['yes_no_arb', 'cross_tf_arb', 'oracle_arb'],
+                'disabled': ['straddle', 'trend_follower', 'penny_sniper',
+                           'cheap_hunter', 'momentum_reversal', 'spread_scalper',
+                           'mid_sniper', 'time_decay'],
+                'min_confidence': self.mode.min_confidence,
+            }
+        elif self.mode_name == 'concentration':
             return {
                 'enabled': ['cheap_hunter', 'oracle_arb', 'yes_no_arb',
-                           'cross_tf_arb'],  # Guaranteed profit — always on
+                           'cross_tf_arb'],
                 'disabled': ['straddle', 'trend_follower', 'penny_sniper'],
                 'min_confidence': self.mode.min_confidence,
             }
