@@ -83,13 +83,13 @@ class Config:
     TIMEFRAME_PARAMS = {
         5: {
             'name': '5 min',
-            'scan_interval': 2,        # FAST: scan every 2 seconds
+            'scan_interval': 1,        # FAST: scan every 1 second (500ms delay removed)
             'position_size_pct': 3.0,   # Small bets, many trades
             'max_positions': 20,
             'take_profit_pct': 200.0,   # Dynamic exit, not % based
             'stop_loss_pct': 16.0,      # Cut at 16%
             'min_confidence': 0.40,     # Low bar — trade often
-            'preferred_strategies': ['cheap_hunter', 'momentum_reversal'],
+            'preferred_strategies': ['cheap_hunter', 'momentum_reversal', 'prob_closer'],
         },
         15: {
             'name': '15 min',
@@ -119,7 +119,10 @@ class Config:
 
     # Flash Crash
     FLASH_DROP_THRESHOLD = float(os.getenv('FLASH_DROP_THRESHOLD', '0.25'))
-    FLASH_LOOKBACK_SECONDS = int(os.getenv('FLASH_LOOKBACK_SECONDS', '10'))
+    FLASH_LOOKBACK_SECONDS = int(os.getenv('FLASH_LOOKBACK_SECONDS', '15'))
+
+    # Dynamic taker fees (5m/15m crypto markets)
+    TAKER_FEE_RATE = float(os.getenv('TAKER_FEE_RATE', '0.0156'))  # ~1.56% at 50% prob
 
     # Oracle Arb
     ORACLE_PRICE_BUFFER = float(os.getenv('ORACLE_PRICE_BUFFER', '0.005'))  # 0.5%

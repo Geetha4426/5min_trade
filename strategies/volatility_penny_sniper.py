@@ -81,7 +81,7 @@ def get_btc_volatility(lookback_minutes: int = 30) -> Dict:
     avg_move = sum(pct_moves) / len(pct_moves) if pct_moves else 0
 
     # High volatility threshold (comparable to TradingView's 2.6)
-    is_high = vol_index >= 2.6
+    is_high = vol_index >= 1.5
 
     return {
         'vol_index': round(vol_index, 2),
@@ -104,7 +104,7 @@ class VolatilityPennySniperStrategy(BaseStrategy):
     description = "Penny bets during high volatility for 20-50x returns"
 
     # Volatility threshold (TradingView-comparable scale)
-    MIN_VOL_INDEX = 2.6
+    MIN_VOL_INDEX = 1.5
 
     # Price range for penny bets (in dollars, 0-1 scale)
     MIN_PENNY_PRICE = 0.01   # Don't buy below 1¢ (too illiquid)

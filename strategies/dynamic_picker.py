@@ -29,6 +29,7 @@ from strategies.continuous import (
 )
 from strategies.cross_timeframe_arb import CrossTimeframeArbStrategy
 from strategies.volatility_penny_sniper import VolatilityPennySniperStrategy
+from strategies.probability_closer import ProbabilityCloserStrategy
 
 
 class DynamicPicker(BaseStrategy):
@@ -44,6 +45,7 @@ class DynamicPicker(BaseStrategy):
         self.strategies: List[BaseStrategy] = [
             CrossTimeframeArbStrategy(),  # Guaranteed cross-TF arb
             YesNoArbStrategy(),           # Guaranteed profit
+            ProbabilityCloserStrategy(),  # Near-expiry high-conviction (NEW)
             CheapOutcomeHunter(),         # Lottery tickets
             MomentumReversal(),           # Catch dips
             OracleArbStrategy(),          # Chainlink delay exploit
@@ -62,7 +64,7 @@ class DynamicPicker(BaseStrategy):
         Optionally filter by balance tier preferences.
         """
         signals: List[TradeSignal] = []
-        min_confidence = 0.30  # Default low bar
+        min_confidence = 0.25  # Low bar — trade more often
 
         # Apply balance tier preferences if available
         enabled = None
@@ -72,7 +74,7 @@ class DynamicPicker(BaseStrategy):
             if enabled_cfg != 'all':
                 enabled = enabled_cfg
             disabled = balance_prefs.get('disabled', [])
-            min_confidence = balance_prefs.get('min_confidence', 0.30)
+            min_confidence = balance_prefs.get('min_confidence', 0.25)
 
         for strategy in self.strategies:
             # Skip disabled strategies
@@ -103,6 +105,8 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.95, s.confidence + 0.10)
             elif s.metadata.get('is_penny_bet'):
                 s.confidence = min(0.85, s.confidence + 0.05)  # Don't over-prioritize
+            elif sig_type == 'prob_closer':
+                s.confidence = min(0.95, s.confidence + 0.15)  # High priority for safe returns
             elif sig_type in ('trend', 'mid_sniper'):
                 s.confidence = min(0.90, s.confidence + 0.05)
 

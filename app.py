@@ -112,6 +112,23 @@ class TradingEngine:
         Config.print_status()
         await self.db.init()
 
+        # Check Polymarket geoblock
+        try:
+            import requests
+            geo = requests.get('https://polymarket.com/api/geoblock', timeout=5).json()
+            ip = geo.get('ip', '?')
+            country = geo.get('country', '?')
+            region = geo.get('region', '?')
+            blocked = geo.get('blocked', True)
+            if blocked:
+                print(f"🚫 GEOBLOCKED! IP: {ip} | Country: {country} | Region: {region}", flush=True)
+                print(f"⚠️ Orders will be REJECTED. Change Railway region to a non-blocked country.", flush=True)
+                print(f"   Blocked: US, UK, DE, FR, IT, AU, SG, etc. Safe: NL, IN, JP, BR, KR", flush=True)
+            else:
+                print(f"✅ Geoblock OK — IP: {ip} | Country: {country} | Region: {region}", flush=True)
+        except Exception as e:
+            print(f"⚠️ Geoblock check failed: {e}", flush=True)
+
         # Initialize live trader (non-blocking — will just warn if no keys)
         live_ok = await self.live_trader.init()
         if live_ok:

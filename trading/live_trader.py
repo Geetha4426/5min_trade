@@ -2,10 +2,11 @@
 Live Trader — Real CLOB Order Execution
 
 Uses py-clob-client to place real orders on Polymarket.
-- Limit orders for BUYING (avoid slippage)
-- FOK market orders for SELLING (instant exit)
+- GTC limit orders for BUYING (queue in orderbook)
+- GTC limit sell at current price for SELLING (fast exit)
 - Auto-cancel unfilled orders after timeout
 - Tracks positions from CLOB fill confirmations
+- Fee-aware PnL (dynamic taker fees on 5m/15m markets)
 
 IMPORTANT: This trades REAL money. Start with $5-10 max.
 """
@@ -31,7 +32,8 @@ class LiveTrader:
     Tracks pending orders and auto-cancels stale ones.
     """
 
-    ORDER_TIMEOUT = 30  # Cancel unfilled orders after 30 seconds
+    ORDER_TIMEOUT = 60  # Cancel unfilled orders after 60 seconds (thin 5m markets need more time)
+    TAKER_FEE_RATE = 0.0156  # ~1.56% dynamic taker fee on 5m/15m crypto markets
 
     def __init__(self, db: Database, balance_mgr: LiveBalanceManager):
         self.db = db
@@ -80,6 +82,21 @@ class LiveTrader:
 
             ok = self.clob_client.get_ok()
             print(f"🟢 CLOB connection: {ok}", flush=True)
+
+            # Fetch dynamic fee rate for 5m/15m markets
+            try:
+                import requests
+                resp = requests.get(
+                    f"{host}/fees",
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    fee_data = resp.json()
+                    fee_rate = float(fee_data.get('taker', fee_data.get('fee_rate', self.TAKER_FEE_RATE)))
+                    self.TAKER_FEE_RATE = fee_rate
+                    print(f"💰 Dynamic taker fee rate: {fee_rate:.4f} ({fee_rate*100:.2f}%)", flush=True)
+            except Exception as e:
+                print(f"⚠️ Fee rate fetch failed, using default {self.TAKER_FEE_RATE:.4f}: {e}", flush=True)
 
             self._initialized = True
             return True
@@ -234,16 +251,19 @@ class LiveTrader:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY
 
-            price = round(signal.entry_price, 2)
-            if price <= 0 or price >= 1.0:
-                return None
+            # Tick-align price to 0.01 increments (Polymarket requirement)
+            price = max(0.01, min(0.99, round(signal.entry_price * 100) / 100))
 
             shares = round(size / price, 2)
+            if shares < 1:
+                return None  # Minimum ~1 share
+
             trade_id = str(uuid.uuid4())[:8]
             now = datetime.now().isoformat()
 
             print(f"📤 PLACING ORDER: {signal.coin} {signal.direction} | "
-                  f"${size:.2f} @ ${price:.3f} ({shares:.1f} shares)", flush=True)
+                  f"${size:.2f} @ ${price:.3f} ({shares:.1f} shares) "
+                  f"[fee~{self.TAKER_FEE_RATE*100:.2f}%]", flush=True)
 
             order_args = OrderArgs(
                 price=price,
@@ -286,6 +306,7 @@ class LiveTrader:
                 'rationale': signal.rationale,
                 'metadata': signal.metadata,
                 'placed_at': time.time(),
+                'fee_rate': self.TAKER_FEE_RATE,
                 '_live': True,
             }
 
@@ -381,45 +402,53 @@ class LiveTrader:
 
     def _exit_decision(self, entry_price: float, current_price: float,
                        seconds_remaining: int) -> str:
-        """Exit decision based on current risk mode."""
+        """Exit decision based on current risk mode. Fee-aware."""
         if entry_price <= 0:
             return 'hold'
 
-        gain = current_price / entry_price
-        pnl_pct = (current_price - entry_price) / entry_price * 100
+        # Fee-aware gain calculation: subtract taker fees from both legs
+        fee_cost = self.TAKER_FEE_RATE * 2  # entry + exit fee
+        raw_gain = current_price / entry_price
+        net_gain = (current_price * (1 - self.TAKER_FEE_RATE)) / (entry_price * (1 + self.TAKER_FEE_RATE))
+        pnl_pct = (net_gain - 1) * 100
 
         mode = self.balance_mgr.mode_name
 
         if mode == 'seed':
             # SEED MODE: Very conservative — protect capital at all costs
-            if gain >= 1.5:  # Take profit at 50% gain
+            if net_gain >= 1.4:  # Take profit at 40% net gain
                 return 'sell'
-            if gain >= 1.2 and seconds_remaining < 20:  # Take small gains near expiry
+            if net_gain >= 1.15 and seconds_remaining < 20:
                 return 'sell'
-            if pnl_pct <= -10:  # Tight stop loss
+            if pnl_pct <= -12:  # Tight stop loss (account for fees)
                 return 'cut_loss'
         elif mode == 'concentration':
-            if gain >= 2.0:
+            if net_gain >= 1.8:
                 return 'sell'
-            if gain >= 1.5 and seconds_remaining < 30:
+            if net_gain >= 1.4 and seconds_remaining < 30:
                 return 'sell'
-            if pnl_pct <= -15:
+            if pnl_pct <= -18:
                 return 'cut_loss'
         elif mode == 'medium':
-            if gain >= 3.0:
+            if net_gain >= 2.5:
                 return 'sell'
-            if gain >= 2.0 and seconds_remaining < 45:
+            if net_gain >= 1.8 and seconds_remaining < 45:
                 return 'sell'
-            if pnl_pct <= -20:
+            if pnl_pct <= -22:
                 return 'cut_loss'
         else:  # aggressive
-            if gain >= 5.0:
+            if net_gain >= 4.0:
                 return 'sell'
-            if gain >= 3.0 and seconds_remaining < 60:
+            if net_gain >= 2.5 and seconds_remaining < 60:
                 return 'sell'
-            if pnl_pct <= -25:
+            if pnl_pct <= -28:
                 return 'cut_loss'
 
+        # Near expiry: if we're in profit net of fees, take it
+        if seconds_remaining < 15 and pnl_pct > 5:
+            return 'sell'
+
+        # Hold penny bets through expiry (let them settle)
         if seconds_remaining < 15 and entry_price < 0.15:
             return 'hold'
 
@@ -427,41 +456,63 @@ class LiveTrader:
 
     async def _close_position(self, trade_id: str, exit_price: float,
                               pnl: float, reason: str) -> bool:
-        """Close a position by placing a sell order."""
+        """Close a position by placing a sell order.
+        
+        Uses GTC limit sell at current price (acts as aggressive limit order).
+        Falls back to a slightly lower price if first attempt fails.
+        """
         pos = self.positions.get(trade_id)
         if not pos:
             return False
 
+        shares = pos.get('shares', 0)
+        if shares <= 0:
+            return False
+
         try:
-            from py_clob_client.clob_types import MarketOrderArgs, OrderType, OrderArgs
+            from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import SELL
 
-            sell_args = MarketOrderArgs(
-                token_id=pos['token_id'],
-                amount=pos.get('shares', 0),
-                side=SELL,
-                order_type=OrderType.FOK,
-            )
+            # Tick-align exit price
+            sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
 
-            signed = self.clob_client.create_market_order(sell_args)
-            resp = self.clob_client.post_order(signed, OrderType.FOK)
+            print(f"📤 SELL ORDER: {pos['coin']} {pos['direction']} | "
+                  f"{shares:.1f} shares @ ${sell_price:.3f} [{reason}]", flush=True)
+
+            # Attempt 1: Limit sell at current price (GTC)
+            sell_args = OrderArgs(
+                price=sell_price,
+                size=shares,
+                side=SELL,
+                token_id=pos['token_id'],
+            )
+            signed_order = self.clob_client.create_order(sell_args)
+            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
 
             if resp and resp.get('status') != 'error':
                 self._finalize_close(trade_id, exit_price, pnl, reason)
                 return True
-            else:
-                print(f"⚠️ FOK sell failed, trying limit sell", flush=True)
-                sell_limit = OrderArgs(
-                    price=round(exit_price, 2),
-                    size=pos.get('shares', 0),
-                    side=SELL,
-                    token_id=pos['token_id'],
-                )
-                signed_limit = self.clob_client.create_order(sell_limit)
-                resp2 = self.clob_client.post_order(signed_limit, OrderType.GTC)
-                if resp2:
-                    self._finalize_close(trade_id, exit_price, pnl, reason)
-                    return True
+
+            # Attempt 2: Sell slightly cheaper to ensure fill
+            print(f"⚠️ Sell attempt 1 failed, trying 1¢ lower", flush=True)
+            retry_price = max(0.01, sell_price - 0.01)
+            sell_args_retry = OrderArgs(
+                price=retry_price,
+                size=shares,
+                side=SELL,
+                token_id=pos['token_id'],
+            )
+            signed_retry = self.clob_client.create_order(sell_args_retry)
+            resp2 = self.clob_client.post_order(signed_retry, OrderType.GTC)
+
+            if resp2 and resp2.get('status') != 'error':
+                # Adjust PnL for lower fill price
+                adj_pnl = (retry_price - pos['entry_price']) * shares
+                self._finalize_close(trade_id, retry_price, adj_pnl, reason)
+                return True
+
+            error_msg = resp2.get('errorMsg', 'Unknown') if resp2 else 'No response'
+            print(f"❌ Both sell attempts failed: {error_msg}", flush=True)
 
         except Exception as e:
             print(f"❌ Sell error: {e}", flush=True)
@@ -470,27 +521,37 @@ class LiveTrader:
 
     def _finalize_close(self, trade_id: str, exit_price: float,
                         pnl: float, reason: str):
-        """Finalize a closed position."""
+        """Finalize a closed position. Fee-aware PnL."""
         pos = self.positions.pop(trade_id, None)
         if not pos:
             return
 
+        # Subtract estimated taker fees from PnL (entry + exit)
+        fee_rate = pos.get('fee_rate', self.TAKER_FEE_RATE)
+        entry_fee = pos['entry_price'] * pos.get('shares', 0) * fee_rate
+        exit_fee = exit_price * pos.get('shares', 0) * fee_rate
+        total_fees = entry_fee + exit_fee
+        net_pnl = pnl - total_fees
+
         pos['exit_price'] = exit_price
-        pos['pnl'] = pnl
-        pos['pnl_pct'] = (pnl / pos['size_usd'] * 100) if pos['size_usd'] > 0 else 0
+        pos['pnl_gross'] = pnl
+        pos['pnl'] = net_pnl
+        pos['fees'] = total_fees
+        pos['pnl_pct'] = (net_pnl / pos['size_usd'] * 100) if pos['size_usd'] > 0 else 0
         pos['exit_time'] = datetime.now().isoformat()
         pos['exit_reason'] = reason
         pos['status'] = 'closed'
 
         self.trade_history.append(pos)
         self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
-        self.balance_mgr.update_balance(self.balance_mgr.balance + pos['size_usd'] + pnl)
+        self.balance_mgr.update_balance(self.balance_mgr.balance + pos['size_usd'] + net_pnl)
 
         gain = exit_price / pos['entry_price'] if pos['entry_price'] > 0 else 0
-        emoji = '🤑' if pnl > 0 else '💸'
+        emoji = '🤑' if net_pnl > 0 else '💸'
         print(f"{emoji} LIVE CLOSED: {pos['coin']} {pos['direction']} — "
               f"Entry:${pos['entry_price']:.3f} -> Exit:${exit_price:.3f} | "
-              f"${pnl:+.2f} ({gain:.1f}x) [{reason}] | "
+              f"Gross:${pnl:+.2f} Fees:${total_fees:.2f} Net:${net_pnl:+.2f} "
+              f"({gain:.1f}x) [{reason}] | "
               f"Bal:${self.balance_mgr.balance:.2f}", flush=True)
 
     async def cancel_all_orders(self):

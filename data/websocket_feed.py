@@ -219,6 +219,15 @@ class PolymarketFeed:
             await self._ws.close()
 
 
+class BinancePriceSnapshot:
+    """Price snapshot with attribute access (compatible with strategy expectations)."""
+    __slots__ = ['price', 'timestamp']
+
+    def __init__(self, price: float, timestamp: float = None):
+        self.price = price
+        self.timestamp = timestamp or time.time()
+
+
 class BinanceFeed:
     """Binance price feed with WebSocket + REST API fallback.
 
@@ -245,6 +254,11 @@ class BinanceFeed:
         self._session.headers.update({
             'User-Agent': '5min-trade-bot/1.0',
         })
+
+    @property
+    def price_history(self) -> Dict[str, deque]:
+        """Expose price history — strategies access this directly."""
+        return self._price_history
 
     def on_price(self, callback: Callable):
         self._on_price = callback
@@ -371,13 +385,11 @@ class BinanceFeed:
         return None
 
     def _update_price(self, coin: str, price: float):
-        """Update price and trigger callback."""
+        """Update price and trigger callback. Stores BinancePriceSnapshot objects."""
         self.latest_prices[coin] = price
+        snap = BinancePriceSnapshot(price)
         if coin in self._price_history:
-            self._price_history[coin].append({
-                'price': price,
-                'timestamp': time.time()
-            })
+            self._price_history[coin].append(snap)
         if self._on_price:
             asyncio.create_task(self._on_price(coin, price))
 
@@ -385,8 +397,8 @@ class BinanceFeed:
         """Get latest price for a coin."""
         return self.latest_prices.get(coin.upper())
 
-    def get_price_history(self, coin: str) -> List[Dict]:
-        """Get price history for a coin."""
+    def get_price_history(self, coin: str) -> List:
+        """Get price history for a coin (list of BinancePriceSnapshot)."""
         history = self._price_history.get(coin.upper())
         if history:
             return list(history)
