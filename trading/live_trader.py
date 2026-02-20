@@ -49,84 +49,126 @@ class LiveTrader:
         self._pause_reason = ''
 
     async def init(self):
-        """Initialize CLOB client with credentials."""
-        if not Config.POLY_PRIVATE_KEY:
-            print("⚠️ No POLY_PRIVATE_KEY — live trading disabled", flush=True)
+        """Initialize CLOB client with credentials.
+        
+        Based on official py-clob-client docs:
+        - signature_type=0: EOA/MetaMask (default)
+        - signature_type=1: Email/Magic wallet
+        - signature_type=2: Browser proxy wallet
+        - funder: address holding funds (required for proxy wallets, optional for EOA)
+        """
+        private_key = Config.POLY_PRIVATE_KEY
+        if not private_key:
+            print("⚠️ No POLY_PRIVATE_KEY set — live trading disabled", flush=True)
+            return False
+
+        # Validate key format
+        private_key = private_key.strip()
+        if not private_key.startswith('0x'):
+            private_key = '0x' + private_key
+        if len(private_key) != 66:  # 0x + 64 hex chars
+            print(f"❌ POLY_PRIVATE_KEY looks wrong (length={len(private_key)}, expected 66)", flush=True)
+            print(f"  Format should be: 0x followed by 64 hex characters", flush=True)
             return False
 
         try:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
+            print(f"🔑 Initializing CLOB client...", flush=True)
 
             host = Config.CLOB_API_URL
-            funder = Config.POLY_FUNDER_ADDRESS or None
+            chain_id = Config.POLY_CHAIN_ID  # 137 = Polygon
+            sig_type = Config.POLY_SIGNATURE_TYPE  # 0=EOA, 1=Magic, 2=Proxy
+            funder = Config.POLY_FUNDER_ADDRESS.strip() if Config.POLY_FUNDER_ADDRESS else None
 
-            creds = None
-            if Config.POLY_API_KEY:
-                creds = ApiCreds(
-                    api_key=Config.POLY_API_KEY,
-                    api_secret=Config.POLY_API_SECRET,
-                    api_passphrase=Config.POLY_PASSPHRASE,
-                )
+            # If funder is empty string, set to None
+            if funder == '':
+                funder = None
 
+            print(f"  Host: {host}", flush=True)
+            print(f"  Chain: {chain_id}", flush=True)
+            print(f"  Sig type: {sig_type} ({'EOA' if sig_type == 0 else 'Magic' if sig_type == 1 else 'Proxy'})", flush=True)
+            print(f"  Funder: {funder or '(none - using EOA address)'}", flush=True)
+
+            # Step 1: Create client
             self.clob_client = ClobClient(
                 host,
-                key=Config.POLY_PRIVATE_KEY,
-                chain_id=Config.POLY_CHAIN_ID,
-                signature_type=Config.POLY_SIGNATURE_TYPE,
+                key=private_key,
+                chain_id=chain_id,
+                signature_type=sig_type,
                 funder=funder,
             )
 
-            if creds:
+            # Step 2: Set or derive API credentials
+            if Config.POLY_API_KEY and Config.POLY_API_KEY.strip():
+                creds = ApiCreds(
+                    api_key=Config.POLY_API_KEY.strip(),
+                    api_secret=Config.POLY_API_SECRET.strip(),
+                    api_passphrase=Config.POLY_PASSPHRASE.strip(),
+                )
                 self.clob_client.set_api_creds(creds)
+                print(f"🔑 Using provided API credentials", flush=True)
             else:
-                derived = self.clob_client.create_or_derive_api_creds()
-                self.clob_client.set_api_creds(derived)
-                print(f"🔑 Derived CLOB API credentials", flush=True)
+                print(f"🔑 Deriving API credentials from private key...", flush=True)
+                try:
+                    derived = self.clob_client.create_or_derive_api_creds()
+                    self.clob_client.set_api_creds(derived)
+                    print(f"✅ API credentials derived successfully", flush=True)
+                except Exception as e:
+                    print(f"❌ Failed to derive API creds: {e}", flush=True)
+                    print(f"  You may need to set POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE manually", flush=True)
+                    return False
 
-            ok = self.clob_client.get_ok()
-            print(f"🟢 CLOB connection: {ok}", flush=True)
+            # Step 3: Test connection
+            try:
+                ok = self.clob_client.get_ok()
+                print(f"🟢 CLOB connection: {ok}", flush=True)
+            except Exception as e:
+                print(f"⚠️ CLOB connection test failed: {e}", flush=True)
+                # Non-fatal — might still work
 
-            # Fetch dynamic fee rate for 5m/15m markets
+            # Step 4: Fetch dynamic fee rate
             try:
                 import requests
-                resp = requests.get(
-                    f"{host}/fees",
-                    timeout=5,
-                )
+                resp = requests.get(f"{host}/fees", timeout=5)
                 if resp.status_code == 200:
                     fee_data = resp.json()
                     fee_rate = float(fee_data.get('taker', fee_data.get('fee_rate', self.TAKER_FEE_RATE)))
                     self.TAKER_FEE_RATE = fee_rate
-                    print(f"💰 Dynamic taker fee rate: {fee_rate:.4f} ({fee_rate*100:.2f}%)", flush=True)
+                    self.BASE_TAKER_FEE_RATE = fee_rate
+                    print(f"💰 Taker fee rate: {fee_rate:.4f} ({fee_rate*100:.2f}%)", flush=True)
             except Exception as e:
-                print(f"⚠️ Fee rate fetch failed, using default {self.TAKER_FEE_RATE:.4f}: {e}", flush=True)
+                print(f"⚠️ Fee rate fetch failed, using default: {e}", flush=True)
 
-            # === CRITICAL: Check actual balance before trading ===
+            # Step 5: Check actual balance
             real_balance = await self._fetch_live_balance()
             if real_balance is not None:
-                if real_balance < 1.0:
+                if real_balance < 0.50:
                     print(f"\n{'='*60}", flush=True)
                     print(f"⚠️  WARNING: Polymarket balance is ${real_balance:.2f}", flush=True)
-                    print(f"  You need to deposit USDC to trade live.", flush=True)
-                    print(f"  1. Go to https://polymarket.com", flush=True)
-                    print(f"  2. Deposit USDC to your wallet", flush=True)
-                    print(f"  3. Make sure CLOB allowance is set", flush=True)
+                    print(f"  You need to:", flush=True)
+                    print(f"  1. Deposit USDC at https://polymarket.com", flush=True)
+                    print(f"  2. Set token allowances (first-time MetaMask users)", flush=True)
+                    print(f"     Run: python -c \"from trading.live_trader import LiveTrader; ...\"", flush=True)
                     print(f"{'='*60}\n", flush=True)
                     self._trading_paused = True
-                    self._pause_reason = f'No balance (${real_balance:.2f})'
+                    self._pause_reason = f'Low balance (${real_balance:.2f})'
                 else:
-                    print(f"💰 Real Polymarket balance: ${real_balance:.2f}", flush=True)
+                    print(f"💰 Polymarket balance: ${real_balance:.2f}", flush=True)
                     self.balance_mgr.update_balance(real_balance)
 
             self._initialized = True
+            print(f"✅ Live trader initialized successfully", flush=True)
             return True
 
-        except ImportError:
-            print("❌ py-clob-client not installed. Run: pip install py-clob-client", flush=True)
+        except ImportError as e:
+            print(f"❌ py-clob-client not installed: {e}", flush=True)
+            print(f"  Run: pip install py-clob-client>=0.18.0", flush=True)
             return False
         except Exception as e:
             print(f"❌ CLOB init error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return False
 
     @property
