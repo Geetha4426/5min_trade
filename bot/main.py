@@ -58,6 +58,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("positions", self.cmd_positions))
         self.app.add_handler(CommandHandler("estop", self.cmd_estop))
         self.app.add_handler(CommandHandler("seed", self.cmd_seed))
+        self.app.add_handler(CommandHandler("debug", self.cmd_debug))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -539,6 +540,61 @@ class TelegramBot:
         text += "Switched to paper mode"
 
         await update.message.reply_text(text)
+
+    async def cmd_debug(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show live trading diagnostics — helps debug Railway config issues."""
+        lines = ["🔧 LIVE TRADING DEBUG\n"]
+
+        # 1. Check env vars
+        pk = Config.POLY_PRIVATE_KEY.strip() if Config.POLY_PRIVATE_KEY else ''
+        lines.append(f"POLY_PRIVATE_KEY: {'✅ set (' + str(len(pk)) + ' chars)' if pk else '❌ NOT SET'}")
+        if pk:
+            lines.append(f"  Starts with 0x: {'✅' if pk.startswith('0x') else '❌ (will auto-add)'}")
+            expected = 66 if pk.startswith('0x') else 64
+            lines.append(f"  Length: {len(pk)} (expected {expected})")
+
+        funder = Config.POLY_FUNDER_ADDRESS.strip() if Config.POLY_FUNDER_ADDRESS else ''
+        lines.append(f"POLY_FUNDER_ADDRESS: {'set' if funder else 'blank (auto-derive)'}")
+
+        api = Config.POLY_API_KEY.strip() if Config.POLY_API_KEY else ''
+        lines.append(f"POLY_API_KEY: {'set (manual)' if api else 'blank (auto-derive) ✅'}")
+
+        lines.append(f"POLY_SIGNATURE_TYPE: {Config.POLY_SIGNATURE_TYPE}")
+        lines.append(f"TRADING_MODE (env): {Config.TRADING_MODE}")
+        lines.append(f"CLOB_API_URL: {Config.CLOB_API_URL}")
+
+        # 2. Derive wallet address
+        wallet = Config.derive_wallet_address()
+        if wallet:
+            lines.append(f"\nDerived wallet: {wallet[:10]}...{wallet[-4:]}")
+        else:
+            lines.append(f"\nDerived wallet: ❌ FAILED")
+
+        # 3. Check live trader state
+        if self.engine:
+            lt = self.engine.live_trader
+            lines.append(f"\n_initialized: {lt._initialized}")
+            lines.append(f"clob_client: {'✅ set' if lt.clob_client else '❌ None'}")
+            lines.append(f"is_ready: {lt.is_ready}")
+            lines.append(f"trading_paused: {lt._trading_paused}")
+            if lt._pause_reason:
+                lines.append(f"pause_reason: {lt._pause_reason}")
+            if hasattr(lt, '_init_error') and lt._init_error:
+                lines.append(f"\n❌ INIT ERROR:\n{lt._init_error}")
+            lines.append(f"\nRuntime mode: {self.engine.trading_mode}")
+
+        # 4. Geoblock check
+        try:
+            import requests
+            geo = requests.get('https://polymarket.com/api/geoblock', timeout=5).json()
+            blocked = geo.get('blocked', True)
+            country = geo.get('country', '?')
+            ip = geo.get('ip', '?')
+            lines.append(f"\nGeoblock: {'🚫 BLOCKED' if blocked else '✅ OK'} (country: {country}, ip: {ip})")
+        except Exception as e:
+            lines.append(f"\nGeoblock check failed: {e}")
+
+        await update.message.reply_text('\n'.join(lines))
 
     # ═══════════════════════════════════════════════════════════════════
     # CALLBACKS

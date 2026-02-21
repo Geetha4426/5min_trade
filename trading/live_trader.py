@@ -47,6 +47,7 @@ class LiveTrader:
         self._consecutive_failures = 0
         self._trading_paused = False
         self._pause_reason = ''
+        self._init_error = ''  # Last init error for /debug
 
     async def init(self):
         """Initialize CLOB client with credentials.
@@ -66,6 +67,7 @@ class LiveTrader:
             print("⚠️ No POLY_PRIVATE_KEY set — live trading disabled", flush=True)
             print("  To enable live trading, set POLY_PRIVATE_KEY in Railway env vars", flush=True)
             print("  Format: 0x followed by 64 hex characters (from MetaMask)", flush=True)
+            self._init_error = 'POLY_PRIVATE_KEY is empty or not set'
             return False
 
         # Validate key format
@@ -75,6 +77,7 @@ class LiveTrader:
         if len(private_key) != 66:  # 0x + 64 hex chars
             print(f"❌ POLY_PRIVATE_KEY looks wrong (length={len(private_key)}, expected 66)", flush=True)
             print(f"  Format should be: 0x followed by 64 hex characters", flush=True)
+            self._init_error = f'POLY_PRIVATE_KEY wrong length: {len(private_key)} (expected 66)'
             return False
 
         try:
@@ -130,6 +133,7 @@ class LiveTrader:
                     print(f"❌ Failed to derive API creds: {e}", flush=True)
                     print(f"  This usually means the private key is invalid or the CLOB API is down.", flush=True)
                     print(f"  If this persists, try setting POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE manually.", flush=True)
+                    self._init_error = f'create_or_derive_api_creds() failed: {e}'
                     return False
 
             # Step 3: Test connection
@@ -177,11 +181,13 @@ class LiveTrader:
         except ImportError as e:
             print(f"❌ py-clob-client not installed: {e}", flush=True)
             print(f"  Run: pip install py-clob-client>=0.18.0", flush=True)
+            self._init_error = f'ImportError: {e}'
             return False
         except Exception as e:
             print(f"❌ CLOB init error: {e}", flush=True)
             import traceback
             traceback.print_exc()
+            self._init_error = f'CLOB init error: {e}'
             return False
 
     @property
