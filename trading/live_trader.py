@@ -414,7 +414,7 @@ class LiveTrader:
             trade_id = str(uuid.uuid4())[:8]
             now = datetime.now().isoformat()
 
-            print(f"\ud83d\udce4 PLACING ORDER: {signal.coin} {signal.direction} | "
+            print(f">> PLACING ORDER: {signal.coin} {signal.direction} | "
                   f"${size:.2f} @ ${price:.3f} ({shares:.1f} shares) "
                   f"[fee~{trade_fee*100:.2f}%]", flush=True)
 
