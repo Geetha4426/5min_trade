@@ -563,6 +563,10 @@ class TelegramBot:
         lines.append(f"TRADING_MODE (env): {Config.TRADING_MODE}")
         lines.append(f"CLOB_API_URL: {Config.CLOB_API_URL}")
 
+        proxy = Config.PROXY_URL
+        lines.append(f"PROXY_URL: {'✅ ' + proxy[:25] + '...' if proxy else '❌ NOT SET (geoblock risk!)'}")
+
+
         # 2. Derive wallet address
         wallet = Config.derive_wallet_address()
         if wallet:

@@ -42,6 +42,13 @@ class Config:
     POLYMARKET_LIVE_WS_URL = 'wss://ws-live-data.polymarket.com'
 
     # ═══════════════════════════════════════════════════════════════════
+    # PROXY (bypass Polymarket geoblock on Railway)
+    # ═══════════════════════════════════════════════════════════════════
+    # Set this to a proxy URL in a non-blocked country (IN, JP, BR, KR)
+    # Formats: http://host:port  |  socks5://host:port  |  socks5://user:pass@host:port
+    PROXY_URL = os.getenv('PROXY_URL', '')
+
+    # ═══════════════════════════════════════════════════════════════════
     # TRADING MODE
     # ═══════════════════════════════════════════════════════════════════
     TRADING_MODE = os.getenv('TRADING_MODE', 'paper')  # 'paper' or 'live'

@@ -6,11 +6,26 @@ The trading engine scans markets, runs strategies, and executes paper trades.
 """
 
 import asyncio
+import os
 import sys
 import signal
 import time
 
 from config import Config
+
+# ═══════════════════════════════════════════════════════════════════
+# PROXY SETUP — must happen BEFORE any HTTP requests
+# ═══════════════════════════════════════════════════════════════════
+if Config.PROXY_URL:
+    os.environ['HTTP_PROXY'] = Config.PROXY_URL
+    os.environ['HTTPS_PROXY'] = Config.PROXY_URL
+    # Some libraries check lowercase
+    os.environ['http_proxy'] = Config.PROXY_URL
+    os.environ['https_proxy'] = Config.PROXY_URL
+    print(f"🌐 Proxy configured: {Config.PROXY_URL[:30]}...", flush=True)
+else:
+    print("🌐 No proxy configured (PROXY_URL not set)", flush=True)
+
 from data.gamma_client import GammaClient
 from data.clob_client import ClobClient
 from data.websocket_feed import PolymarketFeed, BinanceFeed
