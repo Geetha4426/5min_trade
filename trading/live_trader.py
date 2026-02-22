@@ -269,7 +269,11 @@ class LiveTrader:
                 "https://polygon-rpc.com",
             ]
 
+            # Bypass any HTTPS_PROXY / HTTP_PROXY (Railway's proxy breaks RPC calls)
+            no_proxy = {"http": "", "https": ""}
+
             total_balance = 0.0
+            rpc_debug_done = False
             for addr, addr_label in addresses_to_check:
                 # Pad address for balanceOf(address) call: selector 0x70a08231 + 32-byte address
                 padded_addr = addr[2:].lower().zfill(64)
@@ -289,11 +293,16 @@ class LiveTrader:
                                     "params": [{"to": contract, "data": call_data}, "latest"],
                                     "id": 1,
                                 },
-                                timeout=8,
+                                timeout=10,
+                                proxies=no_proxy,
                             )
+                            if not rpc_debug_done:
+                                print(f"  🔗 RPC {rpc_url}: HTTP {resp.status_code}", flush=True)
+                                rpc_debug_done = True
                             if resp.status_code == 200:
                                 rpc_data = resp.json()
                                 if "error" in rpc_data:
+                                    print(f"  ⚠️ RPC error from {rpc_url}: {rpc_data['error']}", flush=True)
                                     continue
                                 result = rpc_data.get("result", "0x0")
                                 balance_wei = int(result, 16)
@@ -302,10 +311,13 @@ class LiveTrader:
                                 balance_found = True
                                 if balance > 0:
                                     total_balance += balance
-                        except Exception:
+                            else:
+                                print(f"  ⚠️ {rpc_url}: HTTP {resp.status_code} {resp.text[:100]}", flush=True)
+                        except Exception as e:
+                            print(f"  ⚠️ {rpc_url}: {type(e).__name__}: {e}", flush=True)
                             continue
                     if not balance_found:
-                        print(f"  ⚠️ {addr_label} [{token_label}]: all RPCs failed", flush=True)
+                        print(f"  ❌ {addr_label} [{token_label}]: all RPCs failed", flush=True)
 
             if total_balance > 0:
                 print(f"💰 Total on-chain USDC: ${total_balance:.2f}", flush=True)
