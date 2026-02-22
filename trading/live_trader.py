@@ -226,22 +226,25 @@ class LiveTrader:
             bal_resp = self.clob_client.get_balance_allowance(params)
             if bal_resp:
                 balance = float(bal_resp.get('balance', 0))
+                allowance = float(bal_resp.get('allowance', 0))
                 # CLOB returns balance in atomic units (6 decimals for USDC)
                 if balance > 1_000_000:
                     balance = balance / 1e6
+                if allowance > 1_000_000:
+                    allowance = allowance / 1e6
+                print(f"💰 CLOB: collateral=${balance:.2f}, allowance=${allowance:.2f}", flush=True)
                 if balance > 0:
-                    print(f"💰 Polymarket balance (CLOB): ${balance:.2f}", flush=True)
                     return round(balance, 2)
-                else:
-                    print(f"⚠️ CLOB reports $0 balance", flush=True)
+                # If $0 COLLATERAL, log it but continue to fallback methods
+                # (User's funds might be in positions, not free USDC)
         except Exception as e:
             print(f"⚠️ CLOB balance failed: {e}", flush=True)
 
         # Method 2: Direct CLOB REST API with L2 HMAC auth
-        # Bypasses py-clob-client library entirely — calls /balance-allowance with HMAC headers
+        # Uses EXACT same signing as py-clob-client: urlsafe_b64decode + urlsafe_b64encode
         try:
             import requests
-            import hmac
+            import hmac as hmac_mod
             import hashlib
             import base64
             from config import Config
@@ -250,43 +253,50 @@ class LiveTrader:
                 api_key = self.clob_client.creds.api_key
                 api_secret = self.clob_client.creds.api_secret
                 api_passphrase = self.clob_client.creds.api_passphrase
+                address = self.clob_client.get_address() or ""
 
-                timestamp = str(int(time.time()))
-                method = "GET"
-                request_path = "/balance-allowance"
-                body = ""
+                def _clob_get(request_path: str, query_params: str = "") -> dict:
+                    """Make an authenticated GET to the CLOB API."""
+                    timestamp = str(int(time.time()))
+                    message = timestamp + "GET" + request_path
 
-                # Build HMAC-SHA256 signature (Polymarket L2 auth)
-                message = timestamp + method + request_path + body
-                hmac_key = base64.b64decode(api_secret)
-                signature = base64.b64encode(
-                    hmac.new(hmac_key, message.encode('utf-8'), hashlib.sha256).digest()
-                ).decode('utf-8')
+                    # HMAC-SHA256 using urlsafe base64 (matches py-clob-client exactly)
+                    hmac_key = base64.urlsafe_b64decode(api_secret)
+                    sig = base64.urlsafe_b64encode(
+                        hmac_mod.new(hmac_key, message.encode('utf-8'), hashlib.sha256).digest()
+                    ).decode('utf-8')
 
-                headers = {
-                    "POLY_ADDRESS": self.clob_client.get_address() or "",
-                    "POLY_SIGNATURE": signature,
-                    "POLY_TIMESTAMP": timestamp,
-                    "POLY_API_KEY": api_key,
-                    "POLY_PASSPHRASE": api_passphrase,
-                }
+                    headers = {
+                        "POLY_ADDRESS": address,
+                        "POLY_SIGNATURE": sig,
+                        "POLY_TIMESTAMP": timestamp,
+                        "POLY_API_KEY": api_key,
+                        "POLY_PASSPHRASE": api_passphrase,
+                    }
 
-                url = f"{Config.CLOB_API_URL}{request_path}"
-                url += f"?asset_type=COLLATERAL&signature_type={self._sig_type}"
+                    url = f"{Config.CLOB_API_URL}{request_path}"
+                    if query_params:
+                        url += f"?{query_params}"
+                    return requests.get(url, headers=headers, timeout=10)
 
-                resp = requests.get(url, headers=headers, timeout=10)
+                # Try COLLATERAL first (free USDC)
+                resp = _clob_get(
+                    "/balance-allowance",
+                    f"asset_type=COLLATERAL&signature_type={self._sig_type}"
+                )
                 if resp.status_code == 200:
                     data = resp.json()
                     balance = float(data.get('balance', 0))
+                    allowance = float(data.get('allowance', 0))
                     if balance > 1_000_000:
                         balance = balance / 1e6
+                    if allowance > 1_000_000:
+                        allowance = allowance / 1e6
+                    print(f"💰 CLOB REST: collateral=${balance:.2f}, allowance=${allowance:.2f}", flush=True)
                     if balance > 0:
-                        print(f"💰 Polymarket balance (REST): ${balance:.2f}", flush=True)
                         return round(balance, 2)
-                    else:
-                        print(f"⚠️ REST API reports $0 balance", flush=True)
                 else:
-                    print(f"⚠️ CLOB REST balance: HTTP {resp.status_code} — {resp.text[:100]}", flush=True)
+                    print(f"⚠️ CLOB REST: HTTP {resp.status_code} — {resp.text[:200]}", flush=True)
         except Exception as e:
             print(f"⚠️ CLOB REST balance failed: {e}", flush=True)
 
