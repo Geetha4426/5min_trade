@@ -207,125 +207,51 @@ class LiveTrader:
 
     async def fetch_balance(self) -> float:
         """
-        Fetch real USDC balance from Polymarket CLOB.
+        Fetch real USDC balance.
 
-        Polymarket uses OFF-CHAIN internal balances:
-        - On-chain USDC ≠ trading balance
-        - Must sync via update_balance_allowance() first
-        - Then read via get_balance_allowance()
+        Based on official Polymarket/agents repo (github.com/Polymarket/agents):
+        They use on-chain USDC.e balanceOf(wallet_address) — NOT a CLOB endpoint.
 
         Methods (in order):
-        1. CLOB: update_balance_allowance → get_balance_allowance (L2 auth)
-        2. Data API: GET /value?user={address} (total portfolio value)
-        3. On-chain USDC (Polygon RPC) → wallet + proxy addresses
+        1. On-chain USDC.e balanceOf (official Polymarket method)
+        2. CLOB update_balance_allowance → get_balance_allowance
+        3. Data API: GET /value?user={address}
         4. STARTING_BALANCE config fallback
         """
         if not self.is_ready:
             return None
 
-        # ═══ Method 1: Sync then read CLOB balance ═══
-        # Step 1a: Call update_balance_allowance to sync on-chain deposit → CLOB ledger
-        # Step 1b: Call get_balance_allowance to read the synced balance
-        try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-            params = BalanceAllowanceParams(
-                asset_type=AssetType.COLLATERAL,
-                signature_type=self._sig_type,  # 0 for EOA
-            )
-
-            # SYNC: Tell the CLOB to refresh balance from on-chain
-            try:
-                sync_resp = self.clob_client.update_balance_allowance(params)
-                if sync_resp:
-                    print(f"🔄 Balance synced with CLOB: {sync_resp}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Balance sync failed (non-fatal): {e}", flush=True)
-
-            # READ: Now get the (hopefully updated) balance
-            bal_resp = self.clob_client.get_balance_allowance(params)
-            if bal_resp:
-                balance = float(bal_resp.get('balance', 0))
-                allowance = float(bal_resp.get('allowance', 0))
-                # CLOB returns balance in atomic units (6 decimals for USDC)
-                if balance > 1_000_000:
-                    balance = balance / 1e6
-                if allowance > 1_000_000:
-                    allowance = allowance / 1e6
-                print(f"💰 CLOB balance: ${balance:.2f} (allowance: ${allowance:.2f})", flush=True)
-                if balance > 0:
-                    return round(balance, 2)
-        except Exception as e:
-            print(f"⚠️ CLOB balance failed: {e}", flush=True)
-
-        # ═══ Method 2: Polymarket Data API ═══
-        # GET https://data-api.polymarket.com/value?user={address}
-        # Returns total portfolio value (cash + positions)
-        try:
-            import requests
-            from eth_account import Account
-            from config import Config
-
-            wallet = Account.from_key(Config.POLY_PRIVATE_KEY)
-            address = wallet.address.lower()
-
-            # Try the data API for portfolio value
-            resp = requests.get(
-                f"https://data-api.polymarket.com/value",
-                params={"user": address},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                # Could be a number or dict
-                if isinstance(data, (int, float)):
-                    value = float(data)
-                elif isinstance(data, dict):
-                    value = float(data.get('value', data.get('balance', 0)))
-                elif isinstance(data, str):
-                    value = float(data)
-                else:
-                    value = 0.0
-
-                if value > 1_000_000:
-                    value = value / 1e6
-                if value > 0:
-                    print(f"💰 Data API portfolio value: ${value:.2f}", flush=True)
-                    return round(value, 2)
-                else:
-                    print(f"⚠️ Data API: portfolio value = $0", flush=True)
-            else:
-                print(f"⚠️ Data API: HTTP {resp.status_code}", flush=True)
-        except Exception as e:
-            print(f"⚠️ Data API failed: {e}", flush=True)
-
-        # Method 2 & 3: On-chain USDC balance via Polygon RPC
-        # Check BOTH wallet address AND proxy/safe address
-        # (Polymarket deposits go to the proxy address, not the signing wallet)
+        # ═══ Method 1: On-chain USDC.e balanceOf (OFFICIAL Polymarket method) ═══
+        # Source: github.com/Polymarket/agents/blob/main/agents/polymarket/polymarket.py
+        # self.usdc.functions.balanceOf(address).call() / 10e5
         try:
             import requests
             from config import Config
             from eth_account import Account
 
             wallet = Account.from_key(Config.POLY_PRIVATE_KEY)
-            addresses_to_check = [wallet.address]
+            wallet_address = wallet.address
+            print(f"🔍 Checking balances for wallet: {wallet_address}", flush=True)
 
-            # Also check the funder/proxy address if different
+            # Addresses to check (wallet is primary, funder/safe if configured)
+            addresses_to_check = [(wallet_address, "wallet")]
             funder = Config.get_funder_address()
-            if funder and funder.lower() != wallet.address.lower():
-                addresses_to_check.append(funder)
-            if Config.POLY_SAFE_ADDRESS and Config.POLY_SAFE_ADDRESS.lower() not in [a.lower() for a in addresses_to_check]:
-                addresses_to_check.append(Config.POLY_SAFE_ADDRESS)
+            if funder and funder.lower() != wallet_address.lower():
+                addresses_to_check.append((funder, "funder"))
+            if Config.POLY_SAFE_ADDRESS and Config.POLY_SAFE_ADDRESS.lower() not in [a.lower() for a, _ in addresses_to_check]:
+                addresses_to_check.append((Config.POLY_SAFE_ADDRESS, "safe"))
 
-            # USDC contracts on Polygon
+            # USDC contracts on Polygon (official: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174)
             usdc_contracts = [
-                ("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "USDC.e"),   # PoS bridged
-                ("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", "USDC"),     # Native
+                ("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "USDC.e"),   # Official Polymarket
+                ("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", "USDC"),     # Native USDC
             ]
 
             total_balance = 0.0
-            for addr in addresses_to_check:
+            for addr, addr_label in addresses_to_check:
+                # Pad address for balanceOf(address) call: selector 0x70a08231 + 32-byte address
                 padded_addr = addr[2:].lower().zfill(64)
-                for contract, label in usdc_contracts:
+                for contract, token_label in usdc_contracts:
                     try:
                         call_data = f"0x70a08231{padded_addr}"
                         resp = requests.post(
@@ -341,18 +267,73 @@ class LiveTrader:
                         if resp.status_code == 200:
                             result = resp.json().get("result", "0x0")
                             balance_wei = int(result, 16)
-                            balance = balance_wei / 1e6
+                            balance = balance_wei / 1e6  # USDC has 6 decimals
+                            print(f"  📊 {addr_label} [{token_label}] ({addr[:8]}...): ${balance:.6f}", flush=True)
                             if balance > 0:
                                 total_balance += balance
-                    except Exception:
-                        pass
+                        else:
+                            print(f"  ⚠️ {addr_label} [{token_label}]: RPC error {resp.status_code}", flush=True)
+                    except Exception as e:
+                        print(f"  ⚠️ {addr_label} [{token_label}]: {e}", flush=True)
 
             if total_balance > 0:
-                print(f"💰 On-chain USDC balance: ${total_balance:.2f}", flush=True)
+                print(f"💰 Total on-chain USDC: ${total_balance:.2f}", flush=True)
                 return round(total_balance, 2)
+            else:
+                print(f"⚠️ No USDC found on any address/contract", flush=True)
 
         except Exception as e:
             print(f"⚠️ On-chain balance failed: {e}", flush=True)
+
+        # ═══ Method 2: CLOB update + read ═══
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=self._sig_type,
+            )
+            try:
+                self.clob_client.update_balance_allowance(params)
+            except Exception:
+                pass
+            bal_resp = self.clob_client.get_balance_allowance(params)
+            if bal_resp:
+                balance = float(bal_resp.get('balance', 0))
+                if balance > 1_000_000:
+                    balance = balance / 1e6
+                print(f"💰 CLOB balance: ${balance:.2f}", flush=True)
+                if balance > 0:
+                    return round(balance, 2)
+        except Exception as e:
+            print(f"⚠️ CLOB balance failed: {e}", flush=True)
+
+        # ═══ Method 3: Data API portfolio value ═══
+        try:
+            import requests
+            from eth_account import Account
+            from config import Config
+
+            wallet = Account.from_key(Config.POLY_PRIVATE_KEY)
+            resp = requests.get(
+                "https://data-api.polymarket.com/value",
+                params={"user": wallet.address.lower()},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, (int, float)):
+                    value = float(data)
+                elif isinstance(data, dict):
+                    value = float(data.get('value', data.get('balance', 0)))
+                elif isinstance(data, str):
+                    value = float(data)
+                else:
+                    value = 0.0
+                if value > 0:
+                    print(f"💰 Data API value: ${value:.2f}", flush=True)
+                    return round(value, 2)
+        except Exception as e:
+            print(f"⚠️ Data API failed: {e}", flush=True)
 
         # Method 4: Fallback to STARTING_BALANCE from config
         # This ensures the bot can trade even if balance fetching is broken
