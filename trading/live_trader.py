@@ -232,7 +232,6 @@ class LiveTrader:
 
             wallet = Account.from_key(Config.POLY_PRIVATE_KEY)
             wallet_address = wallet.address
-            print(f"🔍 Checking balances for wallet: {wallet_address}", flush=True)
 
             # Addresses to check (wallet + proxy/funder/safe)
             addresses_to_check = [(wallet_address, "wallet")]
@@ -255,27 +254,29 @@ class LiveTrader:
             except Exception:
                 pass
 
-            # USDC contracts on Polygon (official: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174)
+            addr_list = ", ".join(f"{label}={addr[:10]}..." for addr, label in addresses_to_check)
+            print(f"🔍 Checking on-chain USDC: {addr_list}", flush=True)
+
+            # USDC contracts on Polygon
             usdc_contracts = [
                 ("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", "USDC.e"),   # Official Polymarket
                 ("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", "USDC"),     # Native USDC
             ]
 
-            # Multiple RPC endpoints (polygon-rpc.com returns 401 from Railway)
+            # Free public Polygon RPC endpoints (2026 — tested working)
             rpc_endpoints = [
-                "https://rpc.ankr.com/polygon",
-                "https://polygon.llamarpc.com",
-                "https://polygon-mainnet.public.blastapi.io",
-                "https://polygon-rpc.com",
+                "https://polygon-bor-rpc.publicnode.com",      # PublicNode/Allnodes
+                "https://1rpc.io/matic",                        # 1RPC by Automata
+                "https://polygon.drpc.org",                     # dRPC
+                "https://polygon.meowrpc.com",                  # MeowRPC
+                "https://polygon-mainnet.gateway.tatum.io",     # Tatum
             ]
 
             # Bypass any HTTPS_PROXY / HTTP_PROXY (Railway's proxy breaks RPC calls)
             no_proxy = {"http": "", "https": ""}
 
             total_balance = 0.0
-            rpc_debug_done = False
             for addr, addr_label in addresses_to_check:
-                # Pad address for balanceOf(address) call: selector 0x70a08231 + 32-byte address
                 padded_addr = addr[2:].lower().zfill(64)
                 for contract, token_label in usdc_contracts:
                     balance_found = False
@@ -296,25 +297,18 @@ class LiveTrader:
                                 timeout=10,
                                 proxies=no_proxy,
                             )
-                            if not rpc_debug_done:
-                                print(f"  🔗 RPC {rpc_url}: HTTP {resp.status_code}", flush=True)
-                                rpc_debug_done = True
                             if resp.status_code == 200:
                                 rpc_data = resp.json()
                                 if "error" in rpc_data:
-                                    print(f"  ⚠️ RPC error from {rpc_url}: {rpc_data['error']}", flush=True)
-                                    continue
+                                    continue  # Try next RPC
                                 result = rpc_data.get("result", "0x0")
                                 balance_wei = int(result, 16)
                                 balance = balance_wei / 1e6  # USDC has 6 decimals
-                                print(f"  📊 {addr_label} [{token_label}] ({addr[:10]}...): ${balance:.6f}", flush=True)
+                                print(f"  📊 {addr_label} [{token_label}]: ${balance:.6f}", flush=True)
                                 balance_found = True
                                 if balance > 0:
                                     total_balance += balance
-                            else:
-                                print(f"  ⚠️ {rpc_url}: HTTP {resp.status_code} {resp.text[:100]}", flush=True)
-                        except Exception as e:
-                            print(f"  ⚠️ {rpc_url}: {type(e).__name__}: {e}", flush=True)
+                        except Exception:
                             continue
                     if not balance_found:
                         print(f"  ❌ {addr_label} [{token_label}]: all RPCs failed", flush=True)
