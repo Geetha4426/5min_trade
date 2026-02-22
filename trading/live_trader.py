@@ -247,34 +247,50 @@ class LiveTrader:
                 ("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", "USDC"),     # Native USDC
             ]
 
+            # Multiple RPC endpoints (polygon-rpc.com returns 401 from Railway)
+            rpc_endpoints = [
+                "https://rpc.ankr.com/polygon",
+                "https://polygon.llamarpc.com",
+                "https://polygon-mainnet.public.blastapi.io",
+                "https://polygon-rpc.com",
+            ]
+
             total_balance = 0.0
             for addr, addr_label in addresses_to_check:
                 # Pad address for balanceOf(address) call: selector 0x70a08231 + 32-byte address
                 padded_addr = addr[2:].lower().zfill(64)
                 for contract, token_label in usdc_contracts:
-                    try:
-                        call_data = f"0x70a08231{padded_addr}"
-                        resp = requests.post(
-                            "https://polygon-rpc.com",
-                            json={
-                                "jsonrpc": "2.0",
-                                "method": "eth_call",
-                                "params": [{"to": contract, "data": call_data}, "latest"],
-                                "id": 1,
-                            },
-                            timeout=8,
-                        )
-                        if resp.status_code == 200:
-                            result = resp.json().get("result", "0x0")
-                            balance_wei = int(result, 16)
-                            balance = balance_wei / 1e6  # USDC has 6 decimals
-                            print(f"  📊 {addr_label} [{token_label}] ({addr[:8]}...): ${balance:.6f}", flush=True)
-                            if balance > 0:
-                                total_balance += balance
-                        else:
-                            print(f"  ⚠️ {addr_label} [{token_label}]: RPC error {resp.status_code}", flush=True)
-                    except Exception as e:
-                        print(f"  ⚠️ {addr_label} [{token_label}]: {e}", flush=True)
+                    balance_found = False
+                    for rpc_url in rpc_endpoints:
+                        if balance_found:
+                            break
+                        try:
+                            call_data = f"0x70a08231{padded_addr}"
+                            resp = requests.post(
+                                rpc_url,
+                                json={
+                                    "jsonrpc": "2.0",
+                                    "method": "eth_call",
+                                    "params": [{"to": contract, "data": call_data}, "latest"],
+                                    "id": 1,
+                                },
+                                timeout=8,
+                            )
+                            if resp.status_code == 200:
+                                rpc_data = resp.json()
+                                if "error" in rpc_data:
+                                    continue
+                                result = rpc_data.get("result", "0x0")
+                                balance_wei = int(result, 16)
+                                balance = balance_wei / 1e6  # USDC has 6 decimals
+                                print(f"  📊 {addr_label} [{token_label}] ({addr[:10]}...): ${balance:.6f}", flush=True)
+                                balance_found = True
+                                if balance > 0:
+                                    total_balance += balance
+                        except Exception:
+                            continue
+                    if not balance_found:
+                        print(f"  ⚠️ {addr_label} [{token_label}]: all RPCs failed", flush=True)
 
             if total_balance > 0:
                 print(f"💰 Total on-chain USDC: ${total_balance:.2f}", flush=True)
