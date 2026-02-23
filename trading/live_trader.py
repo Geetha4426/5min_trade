@@ -100,6 +100,19 @@ class LiveTrader:
             if not funder:
                 funder = None
 
+            # ── Validate proxy wallet config ──
+            if sig_type == 2 and not funder:
+                print(f"\n{'='*60}", flush=True)
+                print(f"❌ PROXY WALLET MODE (sig_type=2) requires POLY_PROXY_WALLET!", flush=True)
+                print(f"  Your Polymarket account uses a browser proxy wallet.", flush=True)
+                print(f"  The proxy wallet is the 'maker' address from the order signing popup.", flush=True)
+                print(f"  Set in Railway:", flush=True)
+                print(f"    POLY_SIGNATURE_TYPE=2", flush=True)
+                print(f"    POLY_PROXY_WALLET=0xYourMakerAddress", flush=True)
+                print(f"{'='*60}\n", flush=True)
+                self._init_error = 'POLY_PROXY_WALLET not set (required for sig_type=2)'
+                return False
+
             print(f"  Host: {host}", flush=True)
             print(f"  Chain: {chain_id}", flush=True)
             print(f"  Sig type: {sig_type} ({'EOA' if sig_type == 0 else 'Magic' if sig_type == 1 else 'Proxy'})", flush=True)

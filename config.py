@@ -26,6 +26,7 @@ class Config:
     POLY_PRIVATE_KEY = os.getenv('POLY_PRIVATE_KEY', '')
     POLY_SAFE_ADDRESS = os.getenv('POLY_SAFE_ADDRESS', '')
     POLY_FUNDER_ADDRESS = os.getenv('POLY_FUNDER_ADDRESS', '')  # Auto-derived if blank
+    POLY_PROXY_WALLET = os.getenv('POLY_PROXY_WALLET', '')  # Proxy/maker wallet (sig_type=2)
     POLY_API_KEY = os.getenv('POLY_API_KEY', '')      # Auto-derived from private key
     POLY_API_SECRET = os.getenv('POLY_API_SECRET', '')  # Auto-derived from private key
     POLY_PASSPHRASE = os.getenv('POLY_PASSPHRASE', '')  # Auto-derived from private key
@@ -183,9 +184,18 @@ class Config:
 
     @classmethod
     def get_funder_address(cls) -> str:
-        """Get funder address — uses explicit config or auto-derives from key."""
+        """Get funder address — uses explicit config or auto-derives from key.
+        
+        For proxy wallets (sig_type=2): returns POLY_PROXY_WALLET (the maker address).
+        For EOA wallets (sig_type=0): auto-derives from private key.
+        """
         if cls.POLY_FUNDER_ADDRESS and cls.POLY_FUNDER_ADDRESS.strip():
             return cls.POLY_FUNDER_ADDRESS.strip()
+        # Proxy wallet (sig_type=2): use POLY_PROXY_WALLET as funder
+        if cls.POLY_SIGNATURE_TYPE == 2:
+            if cls.POLY_PROXY_WALLET and cls.POLY_PROXY_WALLET.strip():
+                return cls.POLY_PROXY_WALLET.strip()
+            return ''  # Must be set explicitly for proxy wallets
         # Auto-derive for EOA wallets (signature_type=0)
         if cls.POLY_SIGNATURE_TYPE == 0:
             return cls.derive_wallet_address()
@@ -220,6 +230,9 @@ class Config:
         if pk_ok:
             print(f"  Wallet: {wallet[:8]}...{wallet[-4:]}" if wallet else "  Wallet: ❌ could not derive", flush=True)
             print(f"  Funder: {funder[:8]}...{funder[-4:]}" if funder else "  Funder: ⚠️ not set (required for proxy wallets)", flush=True)
+            if cls.POLY_SIGNATURE_TYPE == 2:
+                proxy = cls.POLY_PROXY_WALLET.strip() if cls.POLY_PROXY_WALLET else ''
+                print(f"  Proxy Wallet: {proxy[:8]}...{proxy[-4:]}" if proxy else "  Proxy Wallet: ❌ NOT SET — set POLY_PROXY_WALLET!", flush=True)
             print(f"  API Creds: {'🔑 auto-derive from key' if api_auto else '✅ manually set'}", flush=True)
             print(f"  Sig Type: {cls.POLY_SIGNATURE_TYPE} ({'EOA/MetaMask' if cls.POLY_SIGNATURE_TYPE == 0 else 'Email/Magic' if cls.POLY_SIGNATURE_TYPE == 1 else 'Proxy'})", flush=True)
         print(f"Balance: ${cls.STARTING_BALANCE:.2f}", flush=True)
