@@ -1,14 +1,15 @@
 """
-Live Trader — Real CLOB Order Execution
+Live Trader — Real CLOB Order Execution (FOK + GTC)
 
 Uses py-clob-client to place real orders on Polymarket.
-- GTC limit orders for BUYING (queue in orderbook)
-- GTC limit sell at current price for SELLING (fast exit)
-- Auto-cancel unfilled orders after timeout
+- FOK (Fill-or-Kill) for instant $1 trades — no 5-share minimum!
+- GTC limit orders for positioned entries at YOUR desired price
+- FOK sells for instant exits, GTC sells as fallback
+- Auto-cancel unfilled GTC orders after timeout
 - Tracks positions from CLOB fill confirmations
 - Fee-aware PnL (dynamic taker fees on 5m/15m markets)
 
-IMPORTANT: This trades REAL money. Start with $5-10 max.
+IMPORTANT: This trades REAL money. Start with $1-5 max.
 """
 
 import os
@@ -29,8 +30,13 @@ class LiveTrader:
     """
     Real order execution on Polymarket CLOB.
     
-    Uses limit orders for entries (avoids slippage).
-    Uses FOK orders for exits (instant fill).
+    Two entry modes:
+    - FOK (high confidence): Instant fill at $1 minimum, no 5-share rule
+    - GTC (positioning): Place limit at desired price, wait for fill
+    
+    Exit mode:
+    - FOK sell for instant exit, GTC sell as fallback
+    
     Tracks pending orders and auto-cancels stale ones.
     """
 
@@ -435,7 +441,11 @@ class LiveTrader:
             print(f"⚠️ Allowance check failed (non-fatal): {e}", flush=True)
 
     async def execute_signal(self, signal: TradeSignal) -> Optional[Dict]:
-        """Execute a trade signal by placing a LIMIT order on the CLOB."""
+        """Execute a trade signal — FOK for instant fills, GTC for positioning.
+        
+        High confidence (≥0.80): FOK instant fill at $1 (no 5-share minimum)
+        Medium confidence: GTC limit at desired price, wait for fill
+        """
         if not self.is_ready:
             print("⚠️ LiveTrader not initialized", flush=True)
             return None
@@ -456,7 +466,9 @@ class LiveTrader:
         if signal.direction == 'BOTH' and '|' in signal.token_id:
             return await self._execute_both_sides(signal, size)
 
-        return await self._place_limit_buy(signal, size)
+        # Decide: FOK (instant) or GTC (positioned)
+        use_fok = getattr(Config, 'USE_FOK_ORDERS', True) and signal.confidence >= 0.80
+        return await self._place_buy(signal, size, use_fok=use_fok)
 
     async def _execute_both_sides(self, signal: TradeSignal, total_size: float) -> Optional[Dict]:
         """Execute a dual-leg trade (arb, straddle).
@@ -474,10 +486,23 @@ class LiveTrader:
         half_size = max(Config.POLYMARKET_MIN_ORDER_SIZE, total_size / 2)
 
         # ── PRE-VALIDATION: Ensure real balance can cover BOTH legs ──
-        needed = half_size * 2
+        # Calculate ACTUAL cost per leg (5-share min on GTC inflates cost!)
+        import math as _math
         real_bal = await self._get_cached_balance()
+        use_fok_legs = getattr(Config, 'USE_FOK_ORDERS', True)
+        leg_costs = []
+        for _p in [signal.entry_price / 2, signal.entry_price / 2]:  # estimate
+            tick_p = max(0.01, min(0.99, round(_p * 100) / 100))
+            if use_fok_legs:
+                _shares = max(1, round(half_size / tick_p, 2))
+            else:
+                _shares = max(5, round(half_size / tick_p, 2))
+            leg_costs.append(round(tick_p * _shares, 6))
+        needed = sum(leg_costs)
+
         if real_bal is not None and needed > real_bal:
-            print(f"⚠️ Skip dual-leg: need ${needed:.2f} but only ${real_bal:.2f} available", flush=True)
+            print(f"⚠️ Skip dual-leg: need ${needed:.2f} (legs ${leg_costs[0]:.2f}+${leg_costs[1]:.2f}) "
+                  f"but only ${real_bal:.2f} available", flush=True)
             return None
 
         if not self.balance_mgr.can_afford_dual_leg():
@@ -518,7 +543,9 @@ class LiveTrader:
                 rationale=f"[Leg {i+1}/2] {signal.rationale}",
                 metadata={**meta, 'is_dual_leg': True, 'leg_number': i+1},
             )
-            result = await self._place_limit_buy(sub_signal, half_size)
+            # Use FOK for arb legs when enabled (bypasses 5-share min)
+            use_fok_legs = getattr(Config, 'USE_FOK_ORDERS', True) and signal.confidence >= 0.80
+            result = await self._place_buy(sub_signal, half_size, use_fok=use_fok_legs)
             if result:
                 results.append(result)
             else:
@@ -553,13 +580,12 @@ class LiveTrader:
         fee = self.BASE_TAKER_FEE_RATE * probability_factor
         return max(0.0, min(self.BASE_TAKER_FEE_RATE, fee))
 
-    async def _place_limit_buy(self, signal: TradeSignal, size: float) -> Optional[Dict]:
-        """Place a limit buy order on the CLOB.
+    async def _place_buy(self, signal: TradeSignal, size: float, use_fok: bool = False) -> Optional[Dict]:
+        """Place a buy order on the CLOB.
         
-        Key fixes applied:
-        - Uses math.ceil to ensure price × shares >= $1.00 (Polymarket minimum)
-        - Checks real USDC balance before placing
-        - Auto-retries with bumped shares on 'invalid amount' errors
+        Two modes:
+        - FOK (use_fok=True): Instant fill, $1 minimum, NO 5-share minimum
+        - GTC (use_fok=False): Limit order at desired price, 5-share minimum
         """
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -572,21 +598,40 @@ class LiveTrader:
             trade_fee = self._get_dynamic_fee_rate(price)
             self.TAKER_FEE_RATE = trade_fee  # Update for PnL calcs
 
-            # ── Polymarket minimum: 5 shares AND $1.00 order value ──
-            MIN_SHARES = 5  # Polymarket CLOB minimum shares per order
-            raw_shares = round(size / price, 2)
-            shares = max(MIN_SHARES, raw_shares)
+            # ── Check minimum edge after fees ──
+            min_edge = getattr(Config, 'MIN_EDGE_AFTER_FEES', 0.03)
+            if signal.metadata and signal.metadata.get('expected_edge', 1.0) < min_edge + trade_fee * 2:
+                print(f"⚠️ Skip: edge too small after fees ({trade_fee*200:.1f}%)", flush=True)
+                return None
 
-            # Ensure order_amount >= $1.00
-            order_amount = round(price * shares, 6)
-            if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
-                shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
-                shares = max(MIN_SHARES, shares)
+            if use_fok:
+                # ═══ FOK MODE: No 5-share minimum! $1 trades possible ═══
+                # FOK buy: specify dollar amount, API auto-calculates shares
+                shares = round(size / price, 2)
+                if shares < 1:
+                    shares = 1  # Minimum 1 share
                 order_amount = round(price * shares, 6)
+                if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
+                    shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
+                    order_amount = round(price * shares, 6)
+                order_type = OrderType.FOK
+                order_type_tag = 'FOK'
+            else:
+                # ═══ GTC MODE: 5-share minimum, queue in orderbook ═══
+                MIN_SHARES = 5  # Polymarket CLOB minimum for GTC
+                raw_shares = round(size / price, 2)
+                shares = max(MIN_SHARES, raw_shares)
+                order_amount = round(price * shares, 6)
+                if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
+                    shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
+                    shares = max(MIN_SHARES, shares)
+                    order_amount = round(price * shares, 6)
+                order_type = OrderType.GTC
+                order_type_tag = 'GTC'
 
-            actual_cost = order_amount  # What CLOB will charge us
+            actual_cost = order_amount
 
-            # ── FIX: Check real balance BEFORE placing order ──
+            # ── Check real balance BEFORE placing order ──
             real_bal = await self._get_cached_balance()
             if real_bal is not None and actual_cost > real_bal:
                 print(f"⚠️ Skip: order ${actual_cost:.2f} > real balance ${real_bal:.2f}", flush=True)
@@ -595,19 +640,27 @@ class LiveTrader:
             trade_id = str(uuid.uuid4())[:8]
             now = datetime.now().isoformat()
 
-            print(f">> PLACING ORDER: {signal.coin} {signal.direction} | "
+            print(f">> [{order_type_tag}] {signal.coin} {signal.direction} | "
                   f"${actual_cost:.2f} @ ${price:.3f} ({shares:.1f} shares) "
                   f"[fee~{trade_fee*100:.2f}%]", flush=True)
 
-            resp = await self._submit_order(signal.token_id, price, shares, BUY)
+            resp = await self._submit_order(signal.token_id, price, shares, BUY, order_type)
 
             if not resp or resp.get('status') == 'error':
                 error_msg = resp.get('errorMsg', 'Unknown error') if resp else 'No response'
                 print(f"❌ Order rejected: {error_msg}", flush=True)
+
+                # FOK rejection is normal (no liquidity) — try GTC fallback
+                if use_fok and error_msg and 'not fill' in error_msg.lower():
+                    print(f"🔄 FOK didn't fill — falling back to GTC", flush=True)
+                    return await self._place_buy(signal, size, use_fok=False)
                 return None
 
             order_id = resp.get('orderID', resp.get('id', trade_id))
-            print(f"✅ ORDER PLACED: {order_id}", flush=True)
+            print(f"✅ [{order_type_tag}] ORDER {'FILLED' if use_fok else 'PLACED'}: {order_id}", flush=True)
+
+            # FOK fills instantly — goes straight to position
+            initial_status = 'open' if use_fok else 'pending'
 
             trade = {
                 'id': trade_id,
@@ -628,15 +681,22 @@ class LiveTrader:
                 'entry_time': now,
                 'exit_time': None,
                 'exit_reason': None,
-                'status': 'pending',
+                'status': initial_status,
                 'rationale': signal.rationale,
                 'metadata': signal.metadata,
                 'placed_at': time.time(),
                 'fee_rate': self.TAKER_FEE_RATE,
+                'order_type': order_type_tag,
                 '_live': True,
             }
 
-            self.pending_orders[trade_id] = trade
+            if use_fok:
+                # FOK filled — track as open position immediately
+                self.positions[trade_id] = trade
+            else:
+                # GTC — track as pending, check_pending_orders will move to position on fill
+                self.pending_orders[trade_id] = trade
+
             self.balance_mgr.open_positions += 1
             self.balance_mgr.update_balance(self.balance_mgr.balance - actual_cost)
 
@@ -652,11 +712,15 @@ class LiveTrader:
             error_str = str(e).lower()
             print(f"❌ Order error: {e}", flush=True)
 
-            # ── Auto-retry on minimum size errors ──
-            if ('lower than the minimum' in error_str or
+            # ── FOK didn't fill: try GTC fallback ──
+            if use_fok and ('not fill' in error_str or 'no fill' in error_str):
+                print(f"🔄 FOK didn't fill — falling back to GTC", flush=True)
+                return await self._place_buy(signal, size, use_fok=False)
+
+            # ── Auto-retry on minimum size errors (GTC only) ──
+            if not use_fok and ('lower than the minimum' in error_str or
                     ('invalid' in error_str and 'size' in error_str)):
                 try:
-                    # Extract actual minimum from error (e.g., "minimum: 5" → 5)
                     import re
                     min_match = re.search(r'minimum[:\s]+(\d+)', error_str)
                     if min_match:
@@ -665,37 +729,28 @@ class LiveTrader:
                         retry_shares = max(5, math.ceil(shares))
                     
                     if retry_shares > shares:
-                        print(f"🔄 Retrying with {retry_shares} shares (bumped from {shares:.2f})", flush=True)
-                        resp = await self._submit_order(signal.token_id, price, retry_shares, BUY)
+                        print(f"🔄 Retrying GTC with {retry_shares} shares", flush=True)
+                        from py_clob_client.clob_types import OrderType as OT
+                        resp = await self._submit_order(signal.token_id, price, retry_shares, BUY, OT.GTC)
                         if resp and resp.get('status') != 'error':
                             order_id = resp.get('orderID', resp.get('id', str(uuid.uuid4())[:8]))
                             actual_cost = round(price * retry_shares, 6)
-                            print(f"✅ RETRY ORDER PLACED: {order_id} (${actual_cost:.2f})", flush=True)
+                            print(f"✅ [GTC] RETRY PLACED: {order_id} (${actual_cost:.2f})", flush=True)
                             trade_id = str(uuid.uuid4())[:8]
                             trade = {
-                                'id': trade_id,
-                                'order_id': order_id,
-                                'market_id': signal.market_id,
-                                'coin': signal.coin,
-                                'timeframe': signal.timeframe,
-                                'strategy': signal.strategy,
-                                'direction': signal.direction,
-                                'token_id': signal.token_id,
-                                'entry_price': price,
-                                'exit_price': None,
-                                'size_usd': actual_cost,
-                                'shares': retry_shares,
-                                'pnl': None,
-                                'pnl_pct': None,
+                                'id': trade_id, 'order_id': order_id,
+                                'market_id': signal.market_id, 'coin': signal.coin,
+                                'timeframe': signal.timeframe, 'strategy': signal.strategy,
+                                'direction': signal.direction, 'token_id': signal.token_id,
+                                'entry_price': price, 'exit_price': None,
+                                'size_usd': actual_cost, 'shares': retry_shares,
+                                'pnl': None, 'pnl_pct': None,
                                 'confidence': signal.confidence,
                                 'entry_time': datetime.now().isoformat(),
-                                'exit_time': None,
-                                'exit_reason': None,
-                                'status': 'pending',
-                                'rationale': signal.rationale,
-                                'metadata': signal.metadata,
-                                'placed_at': time.time(),
-                                'fee_rate': self.TAKER_FEE_RATE,
+                                'exit_time': None, 'exit_reason': None,
+                                'status': 'pending', 'rationale': signal.rationale,
+                                'metadata': signal.metadata, 'placed_at': time.time(),
+                                'fee_rate': self.TAKER_FEE_RATE, 'order_type': 'GTC',
                                 '_live': True,
                             }
                             self.pending_orders[trade_id] = trade
@@ -712,7 +767,6 @@ class LiveTrader:
             # Detect balance/allowance errors and stop spamming
             if 'balance' in error_str or 'allowance' in error_str:
                 self._consecutive_failures += 1
-                # Refresh real balance on balance errors
                 self._last_balance_check = 0  # Force refresh next time
                 if self._consecutive_failures >= 5:
                     self._trading_paused = True
@@ -725,9 +779,16 @@ class LiveTrader:
 
             return None
 
-    async def _submit_order(self, token_id: str, price: float, shares: float, side) -> Optional[Dict]:
-        """Submit a signed order to the CLOB. Reusable for retries."""
+    # Keep backward compatibility
+    async def _place_limit_buy(self, signal: TradeSignal, size: float) -> Optional[Dict]:
+        """Backward-compatible wrapper — uses GTC limit order."""
+        return await self._place_buy(signal, size, use_fok=False)
+
+    async def _submit_order(self, token_id: str, price: float, shares: float, side, order_type=None) -> Optional[Dict]:
+        """Submit a signed order to the CLOB. Supports GTC, FOK, FAK."""
         from py_clob_client.clob_types import OrderArgs, OrderType
+        if order_type is None:
+            order_type = OrderType.GTC
         order_args = OrderArgs(
             price=price,
             size=shares,
@@ -735,7 +796,7 @@ class LiveTrader:
             token_id=token_id,
         )
         signed_order = self.clob_client.create_order(order_args)
-        return self.clob_client.post_order(signed_order, OrderType.GTC)
+        return self.clob_client.post_order(signed_order, order_type)
 
     async def check_pending_orders(self):
         """Check if pending orders have been filled, partially filled, or need cancellation."""
@@ -890,29 +951,43 @@ class LiveTrader:
 
         return 'hold'
 
-    async def _ensure_conditional_allowance(self, token_id: str):
+    async def _ensure_conditional_allowance(self, token_id: str) -> bool:
         """Set conditional token allowance before selling.
         
         Proxy wallets (sig_type=2) need explicit approval for the exchange
         contract to transfer outcome tokens when placing sell orders.
+        
+        This is the #1 cause of sell failures — if allowance isn't set,
+        every sell attempt fails with 'not enough balance / allowance'.
+        We retry up to 2 times with a small delay.
         """
-        try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-            params = BalanceAllowanceParams(
-                asset_type=AssetType.CONDITIONAL,
-                token_id=token_id,
-                signature_type=self._sig_type,
-            )
-            self.clob_client.update_balance_allowance(params)
-        except Exception as e:
-            print(f"⚠️ Conditional allowance update failed (non-fatal): {e}", flush=True)
+        import asyncio
+        MAX_RETRIES = 2
+        for attempt in range(MAX_RETRIES):
+            try:
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                params = BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                    signature_type=self._sig_type,
+                )
+                self.clob_client.update_balance_allowance(params)
+                if attempt > 0:
+                    print(f"✅ Conditional allowance set (attempt {attempt+1})", flush=True)
+                return True
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    print(f"⚠️ Allowance attempt {attempt+1} failed: {e} — retrying...", flush=True)
+                    await asyncio.sleep(1)
+                else:
+                    print(f"❌ Conditional allowance failed after {MAX_RETRIES} attempts: {e}", flush=True)
+        return False
 
     async def _close_position(self, trade_id: str, exit_price: float,
                               pnl: float, reason: str) -> bool:
         """Close a position by placing a sell order.
         
-        Uses GTC limit sell at current price (acts as aggressive limit order).
-        Falls back to a slightly lower price if first attempt fails.
+        Strategy: FOK sell first (instant exit), GTC fallback if FOK fails.
         Detects expired markets and auto-settles instead of retrying.
         Limits sell retries to 3 per position to avoid API spam.
         """
@@ -926,8 +1001,6 @@ class LiveTrader:
             return False
 
         # ── Sell retry limiter ──
-        # Track consecutive sell failures per position to avoid infinite retry spam.
-        # After MAX_SELL_RETRIES, auto-settle the position.
         MAX_SELL_RETRIES = 3
         sell_fails = pos.get('_sell_fails', 0)
         if sell_fails >= MAX_SELL_RETRIES:
@@ -936,14 +1009,11 @@ class LiveTrader:
             self._finalize_close(trade_id, exit_price, pnl, 'sell_failed_settle')
             return True
 
-        # ── Enforce minimum 5 shares on sells (Polymarket minimum) ──
-        # The CLOB can round 5.0 down to 4.99 internally, so ceil to be safe.
-        MIN_SHARES = 5
-        sell_shares = math.ceil(shares) if shares > 0 else shares
-        sell_shares = max(MIN_SHARES, sell_shares)
-        # Don't sell more shares than we actually have (cap at original amount)
-        # The API will reject if we try to sell more than our balance
-        # But selling exactly 5 when we have 5.0 should work
+        # ── Share sizing ──
+        # FOK sell: use actual share count (can be < 5)
+        # GTC sell: enforce 5-share minimum
+        sell_shares_fok = math.ceil(shares) if shares > 0 else shares
+        sell_shares_gtc = max(5, sell_shares_fok)
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -952,47 +1022,46 @@ class LiveTrader:
             # Tick-align exit price
             sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
 
-            print(f"📤 SELL ORDER: {pos['coin']} {pos['direction']} | "
-                  f"{sell_shares} shares @ ${sell_price:.3f} [{reason}] "
+            # Set conditional token allowance before selling (required for proxy wallets)
+            allowance_ok = await self._ensure_conditional_allowance(pos['token_id'])
+            if not allowance_ok:
+                # If allowance fails, try once more with a delay
+                import asyncio
+                await asyncio.sleep(0.5)
+                await self._ensure_conditional_allowance(pos['token_id'])
+
+            # ═══ Attempt 1: FOK sell (instant exit) ═══
+            print(f"📤 [FOK] SELL: {pos['coin']} {pos['direction']} | "
+                  f"{sell_shares_fok} shares @ ${sell_price:.3f} [{reason}] "
                   f"(attempt {sell_fails + 1}/{MAX_SELL_RETRIES})", flush=True)
 
-            # Set conditional token allowance before selling (required for proxy wallets)
-            await self._ensure_conditional_allowance(pos['token_id'])
-
-            # Attempt 1: Limit sell at current price (GTC)
-            sell_args = OrderArgs(
-                price=sell_price,
-                size=sell_shares,
-                side=SELL,
-                token_id=pos['token_id'],
-            )
-            signed_order = self.clob_client.create_order(sell_args)
-            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+            resp = await self._submit_order(pos['token_id'], sell_price, sell_shares_fok, SELL, OrderType.FOK)
 
             if resp and resp.get('status') != 'error':
+                print(f"✅ [FOK] SELL FILLED instantly", flush=True)
                 self._finalize_close(trade_id, exit_price, pnl, reason)
                 return True
 
-            # Attempt 2: Sell slightly cheaper to ensure fill
-            print(f"⚠️ Sell attempt 1 failed, trying 1¢ lower", flush=True)
-            retry_price = max(0.01, sell_price - 0.01)
-            sell_args_retry = OrderArgs(
-                price=retry_price,
-                size=sell_shares,
-                side=SELL,
-                token_id=pos['token_id'],
-            )
-            signed_retry = self.clob_client.create_order(sell_args_retry)
-            resp2 = self.clob_client.post_order(signed_retry, OrderType.GTC)
+            # ═══ Attempt 2: GTC sell at current price (queue) ═══
+            print(f"⚠️ FOK sell didn't fill — trying GTC", flush=True)
+            resp2 = await self._submit_order(pos['token_id'], sell_price, sell_shares_gtc, SELL, OrderType.GTC)
 
             if resp2 and resp2.get('status') != 'error':
-                # Adjust PnL for lower fill price
-                adj_pnl = (retry_price - pos['entry_price']) * sell_shares
+                self._finalize_close(trade_id, exit_price, pnl, reason)
+                return True
+
+            # ═══ Attempt 3: GTC sell 1¢ lower ═══
+            print(f"⚠️ GTC sell didn't fill — trying 1¢ lower", flush=True)
+            retry_price = max(0.01, sell_price - 0.01)
+            resp3 = await self._submit_order(pos['token_id'], retry_price, sell_shares_gtc, SELL, OrderType.GTC)
+
+            if resp3 and resp3.get('status') != 'error':
+                adj_pnl = (retry_price - pos['entry_price']) * sell_shares_fok
                 self._finalize_close(trade_id, retry_price, adj_pnl, reason)
                 return True
 
-            error_msg = resp2.get('errorMsg', 'Unknown') if resp2 else 'No response'
-            print(f"❌ Both sell attempts failed: {error_msg}", flush=True)
+            error_msg = resp3.get('errorMsg', 'Unknown') if resp3 else 'No response'
+            print(f"❌ All 3 sell attempts failed: {error_msg}", flush=True)
             pos['_sell_fails'] = sell_fails + 1
 
         except Exception as e:
@@ -1008,27 +1077,36 @@ class LiveTrader:
             if 'lower than the minimum' in error_str:
                 import re
                 min_match = re.search(r'minimum[:\s]+(\d+)', error_str)
-                required_min = int(min_match.group(1)) if min_match else MIN_SHARES
-                if sell_shares < required_min:
-                    print(f"🔄 Sell size {sell_shares} < minimum {required_min}, "
-                          f"retrying with {required_min}", flush=True)
-                    try:
-                        sell_args_min = OrderArgs(
-                            price=sell_price,
-                            size=required_min,
-                            side=SELL,
-                            token_id=pos['token_id'],
-                        )
-                        signed_min = self.clob_client.create_order(sell_args_min)
-                        resp_min = self.clob_client.post_order(signed_min, OrderType.GTC)
-                        if resp_min and resp_min.get('status') != 'error':
-                            self._finalize_close(trade_id, exit_price, pnl, reason)
-                            return True
-                    except Exception as retry_e:
-                        print(f"❌ Min-size retry also failed: {retry_e}", flush=True)
+                required_min = int(min_match.group(1)) if min_match else 5
+                print(f"🔄 Sell size too small, retrying with {required_min}", flush=True)
+                try:
+                    resp_min = await self._submit_order(pos['token_id'], sell_price, required_min, SELL, OrderType.GTC)
+                    if resp_min and resp_min.get('status') != 'error':
+                        self._finalize_close(trade_id, exit_price, pnl, reason)
+                        return True
+                except Exception as retry_e:
+                    print(f"❌ Min-size retry also failed: {retry_e}", flush=True)
 
             # ── Handle balance/allowance errors ──
             if 'not enough balance' in error_str or 'allowance' in error_str:
+                # Re-set allowance and try ONE more sell immediately
+                print(f"🔄 Balance/allowance error — refreshing allowance and retrying...", flush=True)
+                try:
+                    import asyncio
+                    await asyncio.sleep(0.5)
+                    await self._ensure_conditional_allowance(pos['token_id'])
+                    await asyncio.sleep(0.5)
+                    # Try FOK sell with exact shares (no minimum)
+                    retry_resp = await self._submit_order(
+                        pos['token_id'], sell_price, sell_shares_fok, SELL, OrderType.FOK
+                    )
+                    if retry_resp and retry_resp.get('status') != 'error':
+                        print(f"✅ Retry sell succeeded after allowance refresh!", flush=True)
+                        self._finalize_close(trade_id, exit_price, pnl, reason)
+                        return True
+                except Exception as retry_e:
+                    print(f"❌ Retry after allowance refresh also failed: {retry_e}", flush=True)
+
                 pos['_sell_fails'] = sell_fails + 1
                 remaining = MAX_SELL_RETRIES - pos['_sell_fails']
                 print(f"❌ Sell error (balance/allowance): {e} "

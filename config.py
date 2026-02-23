@@ -55,7 +55,10 @@ class Config:
     TRADING_MODE = os.getenv('TRADING_MODE', 'paper')  # 'paper' or 'live'
     LIVE_RISK_MODE = os.getenv('LIVE_RISK_MODE', 'concentration')  # concentration/medium/aggressive
     STARTING_BALANCE = float(os.getenv('STARTING_BALANCE', '100.0'))
-    POLYMARKET_MIN_ORDER_SIZE = 1.0  # Polymarket minimum order = $1
+    POLYMARKET_MIN_ORDER_SIZE = 1.0  # $1 minimum (FOK allows this!)
+    USE_FOK_ORDERS = os.getenv('USE_FOK_ORDERS', 'true').lower() == 'true'  # FOK for instant fills
+    MARKET_FOCUS_IDLE_SCANS = int(os.getenv('MARKET_FOCUS_IDLE_SCANS', '3'))  # Switch market after N empty scans
+    MIN_EDGE_AFTER_FEES = float(os.getenv('MIN_EDGE_AFTER_FEES', '0.03'))  # 3¢ minimum edge after fees
 
     # ═══════════════════════════════════════════════════════════════════
     # COINS
