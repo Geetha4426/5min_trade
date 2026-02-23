@@ -914,7 +914,9 @@ class LiveTrader:
         Uses GTC limit sell at current price (acts as aggressive limit order).
         Falls back to a slightly lower price if first attempt fails.
         Detects expired markets and auto-settles instead of retrying.
+        Limits sell retries to 3 per position to avoid API spam.
         """
+        import math
         pos = self.positions.get(trade_id)
         if not pos:
             return False
@@ -922,6 +924,26 @@ class LiveTrader:
         shares = pos.get('shares', 0)
         if shares <= 0:
             return False
+
+        # ── Sell retry limiter ──
+        # Track consecutive sell failures per position to avoid infinite retry spam.
+        # After MAX_SELL_RETRIES, auto-settle the position.
+        MAX_SELL_RETRIES = 3
+        sell_fails = pos.get('_sell_fails', 0)
+        if sell_fails >= MAX_SELL_RETRIES:
+            print(f"⏰ Max sell retries ({MAX_SELL_RETRIES}) reached — auto-settling "
+                  f"{pos['coin']} {pos['direction']}", flush=True)
+            self._finalize_close(trade_id, exit_price, pnl, 'sell_failed_settle')
+            return True
+
+        # ── Enforce minimum 5 shares on sells (Polymarket minimum) ──
+        # The CLOB can round 5.0 down to 4.99 internally, so ceil to be safe.
+        MIN_SHARES = 5
+        sell_shares = math.ceil(shares) if shares > 0 else shares
+        sell_shares = max(MIN_SHARES, sell_shares)
+        # Don't sell more shares than we actually have (cap at original amount)
+        # The API will reject if we try to sell more than our balance
+        # But selling exactly 5 when we have 5.0 should work
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -931,7 +953,8 @@ class LiveTrader:
             sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
 
             print(f"📤 SELL ORDER: {pos['coin']} {pos['direction']} | "
-                  f"{shares:.1f} shares @ ${sell_price:.3f} [{reason}]", flush=True)
+                  f"{sell_shares} shares @ ${sell_price:.3f} [{reason}] "
+                  f"(attempt {sell_fails + 1}/{MAX_SELL_RETRIES})", flush=True)
 
             # Set conditional token allowance before selling (required for proxy wallets)
             await self._ensure_conditional_allowance(pos['token_id'])
@@ -939,7 +962,7 @@ class LiveTrader:
             # Attempt 1: Limit sell at current price (GTC)
             sell_args = OrderArgs(
                 price=sell_price,
-                size=shares,
+                size=sell_shares,
                 side=SELL,
                 token_id=pos['token_id'],
             )
@@ -955,7 +978,7 @@ class LiveTrader:
             retry_price = max(0.01, sell_price - 0.01)
             sell_args_retry = OrderArgs(
                 price=retry_price,
-                size=shares,
+                size=sell_shares,
                 side=SELL,
                 token_id=pos['token_id'],
             )
@@ -964,27 +987,57 @@ class LiveTrader:
 
             if resp2 and resp2.get('status') != 'error':
                 # Adjust PnL for lower fill price
-                adj_pnl = (retry_price - pos['entry_price']) * shares
+                adj_pnl = (retry_price - pos['entry_price']) * sell_shares
                 self._finalize_close(trade_id, retry_price, adj_pnl, reason)
                 return True
 
             error_msg = resp2.get('errorMsg', 'Unknown') if resp2 else 'No response'
             print(f"❌ Both sell attempts failed: {error_msg}", flush=True)
+            pos['_sell_fails'] = sell_fails + 1
 
         except Exception as e:
             error_str = str(e).lower()
 
             # ── Detect expired/resolved market ──
-            # After a 5m market closes, the orderbook is deleted.
-            # Don't retry — let Polymarket auto-settle and pay out.
             if 'does not exist' in error_str or 'orderbook' in error_str:
                 print(f"⏰ Market expired/resolved — auto-settling {pos['coin']} {pos['direction']}", flush=True)
-                # For expired markets: if we held a winning position, we get $1/share.
-                # If losing, we get $0. Use last known price as best estimate.
                 self._finalize_close(trade_id, exit_price, pnl, 'market_settled')
                 return True
 
-            print(f"❌ Sell error: {e}", flush=True)
+            # ── Handle minimum size errors on sell ──
+            if 'lower than the minimum' in error_str:
+                import re
+                min_match = re.search(r'minimum[:\s]+(\d+)', error_str)
+                required_min = int(min_match.group(1)) if min_match else MIN_SHARES
+                if sell_shares < required_min:
+                    print(f"🔄 Sell size {sell_shares} < minimum {required_min}, "
+                          f"retrying with {required_min}", flush=True)
+                    try:
+                        sell_args_min = OrderArgs(
+                            price=sell_price,
+                            size=required_min,
+                            side=SELL,
+                            token_id=pos['token_id'],
+                        )
+                        signed_min = self.clob_client.create_order(sell_args_min)
+                        resp_min = self.clob_client.post_order(signed_min, OrderType.GTC)
+                        if resp_min and resp_min.get('status') != 'error':
+                            self._finalize_close(trade_id, exit_price, pnl, reason)
+                            return True
+                    except Exception as retry_e:
+                        print(f"❌ Min-size retry also failed: {retry_e}", flush=True)
+
+            # ── Handle balance/allowance errors ──
+            if 'not enough balance' in error_str or 'allowance' in error_str:
+                pos['_sell_fails'] = sell_fails + 1
+                remaining = MAX_SELL_RETRIES - pos['_sell_fails']
+                print(f"❌ Sell error (balance/allowance): {e} "
+                      f"({remaining} retries left)", flush=True)
+                return False
+
+            # General sell error — still count it
+            pos['_sell_fails'] = sell_fails + 1
+            print(f"❌ Sell error: {e} ({MAX_SELL_RETRIES - pos['_sell_fails']} retries left)", flush=True)
 
         return False
 
