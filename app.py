@@ -349,6 +349,11 @@ class TradingEngine:
                 closed = await self.active_trader.check_positions(current_prices, secs_map)
                 for trade in closed:
                     await self.bot.send_close_alert(trade)
+                    # ── Feed result to strategy win rate tracker ──
+                    pnl = trade.get('pnl', 0) or 0
+                    strat_name = trade.get('strategy', '')
+                    if strat_name and hasattr(self.dynamic_picker, 'tracker'):
+                        self.dynamic_picker.tracker.record(strat_name, pnl > 0, pnl)
 
                 # Scan interval from config
                 min_tf = min(self.active_timeframes) if self.active_timeframes else 15
@@ -402,6 +407,9 @@ async def main():
                     BotCommand("markets", "Scan live markets"),
                     BotCommand("history", "Trade history"),
                     BotCommand("settings", "Bot settings"),
+                    BotCommand("drawdown", "Risk tracking status"),
+                    BotCommand("stratstats", "Strategy win rates"),
+                    BotCommand("resume", "Reset drawdown tracking"),
                 ])
                 print("✅ Bot commands registered", flush=True)
             except Exception as e:

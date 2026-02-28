@@ -49,8 +49,17 @@ class ProbabilityCloserStrategy(BaseStrategy):
     # Minimum depth to ensure we can fill
     MIN_DEPTH = 1.0  # $1
 
-    # Estimated taker fee (entry + exit combined)
-    TAKER_FEE_RATE = 0.0156
+    # Estimated taker fee — will use dynamic calculation per price
+    BASE_FEE_RATE = 0.0156
+
+    @staticmethod
+    def _dynamic_fee(price: float) -> float:
+        """Correct Polymarket fee: C × 0.25 × (p×(1-p))²."""
+        p = max(0.001, min(0.999, price))
+        q = 1.0 - p
+        pq_sq = (p * q) ** 2
+        C = 0.0156 / 0.015625  # calibrated so fee=1.56% at p=0.50
+        return max(0.0, min(0.0156, C * 0.25 * pq_sq))
 
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         """
@@ -87,7 +96,8 @@ class ProbabilityCloserStrategy(BaseStrategy):
 
         if up_ask >= self.MIN_WINNER_PRICE and up_ask <= self.MAX_BUY_PRICE:
             discount = 1.0 - up_ask
-            net_profit = discount - (up_ask * self.TAKER_FEE_RATE * 2)
+            fee_rate = self._dynamic_fee(up_ask)
+            net_profit = discount - (up_ask * fee_rate * 2)
             if net_profit > 0.01:  # At least 1¢ net profit
                 candidates.append({
                     'direction': 'UP',
@@ -100,7 +110,8 @@ class ProbabilityCloserStrategy(BaseStrategy):
 
         if down_ask >= self.MIN_WINNER_PRICE and down_ask <= self.MAX_BUY_PRICE:
             discount = 1.0 - down_ask
-            net_profit = discount - (down_ask * self.TAKER_FEE_RATE * 2)
+            fee_rate = self._dynamic_fee(down_ask)
+            net_profit = discount - (down_ask * fee_rate * 2)
             if net_profit > 0.01:
                 candidates.append({
                     'direction': 'DOWN',

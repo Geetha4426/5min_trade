@@ -122,8 +122,9 @@ class VolatilityPennySniperStrategy(BaseStrategy):
     # Maximum active penny positions (don't overexpose)
     MAX_PENNY_POSITIONS = 5
 
-    # Track active penny bets to limit exposure
-    _active_pennies = []
+    def __init__(self):
+        # Track active penny bets to limit exposure (instance-level)
+        self._active_pennies = []
 
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         """
@@ -137,6 +138,10 @@ class VolatilityPennySniperStrategy(BaseStrategy):
         """
         clob = context.get('clob')
         seconds_remaining = context.get('seconds_remaining', 0)
+
+        # Enforce max penny position limit
+        if len(self._active_pennies) >= self.MAX_PENNY_POSITIONS:
+            return None
 
         if not clob:
             return None
@@ -154,8 +159,10 @@ class VolatilityPennySniperStrategy(BaseStrategy):
         if seconds_remaining > timeframe * 60 * 0.7:  # Too early, prices centered
             return None
 
-        # === VOLATILITY CHECK ===
-        vol = get_btc_volatility(lookback_minutes=30)
+        # === VOLATILITY CHECK (sync REST call — run in executor to avoid blocking) ===
+        import asyncio
+        loop = asyncio.get_event_loop()
+        vol = await loop.run_in_executor(None, get_btc_volatility, 30)
         if not vol['is_high']:
             return None
 

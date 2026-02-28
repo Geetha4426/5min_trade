@@ -44,8 +44,15 @@ class CrossTimeframeArbStrategy(BaseStrategy):
     # Minimum profit per share to bother (AFTER FEES)
     MIN_PROFIT = 0.03  # 3¢ = ~3% net of fees
 
-    # Estimated taker fee rate per leg (dynamic, peaks ~1.56% at 50% prob)
-    EST_FEE_RATE = 0.0156
+    # Estimated taker fee rate per leg — use dynamic formula
+    @staticmethod
+    def _dynamic_fee(price: float) -> float:
+        """Correct Polymarket fee: C × 0.25 × (p×(1-p))²."""
+        p = max(0.001, min(0.999, price))
+        q = 1.0 - p
+        pq_sq = (p * q) ** 2
+        C = 0.0156 / 0.015625
+        return max(0.0, min(0.0156, C * 0.25 * pq_sq))
 
     # Minimum depth on both sides (avoid thin markets)
     MIN_DEPTH = 2.0  # $2
@@ -54,8 +61,9 @@ class CrossTimeframeArbStrategy(BaseStrategy):
     OVERLAP_MIN_SECS = 120   # 2 min — need enough execution time
     OVERLAP_MAX_SECS = 420   # 7 min — the 5-min market just opened
 
-    # Track discovered pairs to avoid duplicate signals
-    _active_pairs = {}
+    # Track discovered pairs to avoid duplicate signals (instance-level)
+    def __init__(self):
+        self._active_pairs = {}
 
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         """
@@ -165,17 +173,22 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             return None
 
         # === FIND THE BEST COMBINATION (FEE-AWARE) ===
-        # Apply estimated taker fee on each leg to get true profit
-        fee_rate = self.EST_FEE_RATE
+        # Apply dynamic taker fee on each leg (quadratic formula)
 
         # Option A: Buy UP on longer + DOWN on shorter
         combo_a_cost = longer_up_book['best_ask'] + shorter_dn_book['best_ask']
-        combo_a_fees = combo_a_cost * fee_rate * 2  # Fee on entry of each leg
+        combo_a_fee_1 = self._dynamic_fee(longer_up_book['best_ask'])
+        combo_a_fee_2 = self._dynamic_fee(shorter_dn_book['best_ask'])
+        combo_a_fees = (longer_up_book['best_ask'] * combo_a_fee_1 +
+                        shorter_dn_book['best_ask'] * combo_a_fee_2)
         combo_a_profit = 1.0 - combo_a_cost - combo_a_fees
 
         # Option B: Buy DOWN on longer + UP on shorter
         combo_b_cost = longer_dn_book['best_ask'] + shorter_up_book['best_ask']
-        combo_b_fees = combo_b_cost * fee_rate * 2
+        combo_b_fee_1 = self._dynamic_fee(longer_dn_book['best_ask'])
+        combo_b_fee_2 = self._dynamic_fee(shorter_up_book['best_ask'])
+        combo_b_fees = (longer_dn_book['best_ask'] * combo_b_fee_1 +
+                        shorter_up_book['best_ask'] * combo_b_fee_2)
         combo_b_profit = 1.0 - combo_b_cost - combo_b_fees
 
         # Pick the most profitable combination

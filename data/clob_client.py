@@ -155,7 +155,7 @@ class ClobClient:
             'up': up_book,
             'down': down_book,
             'combined_ask': combined_price,
-            'arb_opportunity': combined_price < 0.98,  # Can buy both for < $0.98
+            'arb_opportunity': combined_price < Config.ARB_MAX_COMBINED_PRICE,
             'arb_profit': max(0, 1.0 - combined_price),
         }
 

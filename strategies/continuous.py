@@ -153,9 +153,10 @@ class StraddleStrategy(BaseStrategy):
 
         combined = up_ask + down_ask
 
-        # CRITICAL: if combined >= $0.95, this is a guaranteed loss
-        # Both sides together pay out exactly $1.00 at settlement
-        if combined >= 0.95:
+        # CRITICAL: if combined >= $0.92, guaranteed loss after fees
+        # Both sides pay out exactly $1.00 at settlement
+        # Fees at ~50¢ each: 2 × ~1.56% = ~3.12¢ → need combined ≤ $0.92
+        if combined >= 0.92:
             return None
 
         # Check for volatility: are prices swinging?
@@ -239,9 +240,16 @@ class SpreadScalper(BaseStrategy):
 
             # Wide spread = opportunity (5+ cents)
             if spread >= 0.05 and book['bid_depth'] > 0.50 and book['ask_depth'] > 0.50:
-                # Buy closer to bid, profit on spread
+                # We buy at the ask with FOK, target exit at a mid-to-ask price
                 mid_price = (book['best_ask'] + book['best_bid']) / 2
                 
+                # Profit target: sell at mid (half the spread minus fees)
+                # Fee at mid ≈ dynamic, but at most ~1.56% × 2 legs ≈ 3.12%
+                # Need spread/2 > 3.12% of entry price to profit
+                min_profit_spread = book['best_ask'] * 0.035  # ~3.5% for fees
+                if spread / 2 < min_profit_spread:
+                    continue
+
                 # Only trade in reasonable price range (10-90 cents)
                 if not (0.10 <= mid_price <= 0.90):
                     continue

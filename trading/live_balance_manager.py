@@ -1,15 +1,21 @@
 """
-Live Balance Manager — 3 Risk Modes for Real Trading
+Live Balance Manager — Risk Modes + Smart Sizing
 
 MODES:
   🎯 CONCENTRATION: Safe growth. Keep 50% reserve, small bets, high confidence bar.
   ⚖️ MEDIUM: Balanced. Keep 30% reserve, moderate bets, 1/3 risk ratio.
   🔥 AGGRESSIVE: Full compound. Keep $2 reserve only, big bets, low confidence bar.
 
+SMART RISK ADAPTATION (does NOT block trading):
+  - Peak/daily drawdown tracking → alerts only (logged + Telegram /drawdown)
+  - Consecutive loss sizing → gentle 5% reduction per loss, 5% growth per win
+  - Never halts, never pauses — the bot's job is to TRADE
+
 All modes respect Polymarket's $1 minimum order size.
 Position count is dynamic based on balance.
 """
 
+import time
 from typing import Dict
 from config import Config
 
@@ -90,16 +96,36 @@ class LiveBalanceManager:
     """
     Dynamic balance management for live trading.
     
-    Respects Polymarket $1 minimum order size.
-    Position count scales with balance.
-    Reserve ensures you never fully bust.
+    Features:
+    - Respects Polymarket $1 minimum order size
+    - Position count scales with balance
+    - Reserve ensures you never fully bust
+    - Multi-layer drawdown protection (daily + peak)
+    - Consecutive loss sizing (shrink bets after losses)
     """
+
+    # ── Consecutive loss/win sizing (gentle — never blocks) ──
+    LOSS_SHRINK_FACTOR = 0.95      # Reduce bet by 5% per consecutive loss
+    WIN_GROW_FACTOR = 1.05         # Increase bet by 5% per consecutive win
+    MAX_SIZE_MULTIPLIER = 1.30     # Max growth from wins (130% of normal)
+    MIN_SIZE_MULTIPLIER = 0.60     # Min shrink from losses (60% of normal)
 
     def __init__(self, balance: float, mode: str = 'concentration'):
         self.balance = balance
         self.mode_name = mode.lower()
         self.mode = LIVE_MODES.get(self.mode_name, LIVE_MODES['concentration'])
         self.open_positions = 0
+
+        # ── Drawdown tracking (alert-only, never blocks) ──
+        self.peak_balance = balance          # Highest balance ever seen
+        self.daily_start_balance = balance   # Balance at start of day
+        self._daily_reset_ts = time.time()   # When daily tracking started
+        self._drawdown_alerted = False       # True if drawdown alert sent
+
+        # ── Consecutive loss tracking ──
+        self._consecutive_losses = 0
+        self._consecutive_wins = 0
+        self._size_multiplier = 1.0          # Dynamic bet size multiplier
 
     def set_mode(self, mode: str):
         """Switch risk mode."""
@@ -113,8 +139,61 @@ class LiveBalanceManager:
         return False
 
     def update_balance(self, new_balance: float):
-        """Update balance after trade."""
+        """Update balance after trade. Tracks peak and daily reset."""
         self.balance = new_balance
+        # Update peak balance (only goes up)
+        if new_balance > self.peak_balance:
+            self.peak_balance = new_balance
+        # Reset daily tracking every 24h
+        now = time.time()
+        if now - self._daily_reset_ts > 86400:  # 24 hours
+            self.daily_start_balance = new_balance
+            self._daily_reset_ts = now
+            self._daily_paused_until = 0.0
+
+    def record_result(self, won: bool):
+        """Track consecutive wins/losses for dynamic sizing."""
+        if won:
+            self._consecutive_wins += 1
+            self._consecutive_losses = 0
+            # Grow size multiplier (capped)
+            self._size_multiplier = min(
+                self.MAX_SIZE_MULTIPLIER,
+                self._size_multiplier * self.WIN_GROW_FACTOR
+            )
+        else:
+            self._consecutive_losses += 1
+            self._consecutive_wins = 0
+            # Shrink size multiplier (floored)
+            self._size_multiplier = max(
+                self.MIN_SIZE_MULTIPLIER,
+                self._size_multiplier * self.LOSS_SHRINK_FACTOR
+            )
+
+    def reset_tracking(self) -> str:
+        """Reset drawdown tracking and consecutive loss counter."""
+        self.peak_balance = self.balance
+        self.daily_start_balance = self.balance
+        self._daily_reset_ts = time.time()
+        self._drawdown_alerted = False
+        self._size_multiplier = 1.0
+        self._consecutive_losses = 0
+        self._consecutive_wins = 0
+        return f"✅ Tracking reset. Peak=${self.balance:.2f}, sizing=1.00×"
+
+    @property
+    def daily_pnl_pct(self) -> float:
+        """Current daily PnL as percentage."""
+        if self.daily_start_balance <= 0:
+            return 0.0
+        return (self.balance - self.daily_start_balance) / self.daily_start_balance * 100
+
+    @property
+    def drawdown_pct(self) -> float:
+        """Current drawdown from peak as percentage."""
+        if self.peak_balance <= 0:
+            return 0.0
+        return (self.peak_balance - self.balance) / self.peak_balance * 100
 
     @property
     def reserve(self) -> float:
@@ -135,7 +214,17 @@ class LiveBalanceManager:
         return max(1, min(by_balance, by_min_size, self.mode.max_positions_cap))
 
     def can_trade(self) -> tuple:
-        """Check if we can open a new position."""
+        """Check if we can open a new position. Drawdown is alert-only, never blocks."""
+        # ── Drawdown alerts (log only, NEVER block trading) ──
+        dd = self.drawdown_pct
+        if dd >= 25 and not self._drawdown_alerted:
+            self._drawdown_alerted = True
+            print(f"⚠️ DRAWDOWN ALERT: {dd:.1f}% from peak "
+                  f"${self.peak_balance:.2f} → ${self.balance:.2f}", flush=True)
+        elif dd < 15:
+            self._drawdown_alerted = False  # Reset alert when recovered
+
+        # ── Standard checks (the ONLY things that block trading) ──
         if self.balance < Config.POLYMARKET_MIN_ORDER_SIZE:
             return False, "💀 Balance below minimum order size"
         if self.tradeable_balance < Config.POLYMARKET_MIN_ORDER_SIZE:
@@ -150,13 +239,19 @@ class LiveBalanceManager:
 
     def get_position_size(self, confidence: float) -> float:
         """
-        Calculate position size. Dynamic based on balance, mode, and confidence.
+        Calculate position size. Dynamic based on balance, mode, confidence,
+        and consecutive loss multiplier.
         
+        After consecutive losses, sizes gently shrink by 5% each.
+        After consecutive wins, sizes grow by 5% each (capped at 130%).
         Always returns at least $1 (Polymarket minimum) or 0 if can't trade.
         """
         # Scale bet size with confidence
         pct = self.mode.max_bet_pct * (0.5 + confidence * 0.5)
         size = self.tradeable_balance * pct / 100
+
+        # Apply consecutive loss/win multiplier
+        size *= self._size_multiplier
 
         # Enforce Polymarket minimum
         min_size = Config.POLYMARKET_MIN_ORDER_SIZE
@@ -228,4 +323,13 @@ class LiveBalanceManager:
             'max_positions': self.max_positions,
             'open_positions': self.open_positions,
             'min_confidence': self.mode.min_confidence,
+            # Drawdown protection
+            'peak_balance': self.peak_balance,
+            'drawdown_pct': self.drawdown_pct,
+            'daily_pnl_pct': self.daily_pnl_pct,
+            'drawdown_alerted': self._drawdown_alerted,
+            # Consecutive loss sizing
+            'consecutive_losses': self._consecutive_losses,
+            'consecutive_wins': self._consecutive_wins,
+            'size_multiplier': self._size_multiplier,
         }

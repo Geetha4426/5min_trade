@@ -59,6 +59,9 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("estop", self.cmd_estop))
         self.app.add_handler(CommandHandler("seed", self.cmd_seed))
         self.app.add_handler(CommandHandler("debug", self.cmd_debug))
+        self.app.add_handler(CommandHandler("resume", self.cmd_resume))
+        self.app.add_handler(CommandHandler("drawdown", self.cmd_drawdown))
+        self.app.add_handler(CommandHandler("stratstats", self.cmd_stratstats))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -598,6 +601,57 @@ class TelegramBot:
         except Exception as e:
             lines.append(f"\nGeoblock check failed: {e}")
 
+        await update.message.reply_text('\n'.join(lines))
+
+    async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reset drawdown tracking and consecutive loss counter."""
+        if not self.engine:
+            await update.message.reply_text("❌ Engine not initialized")
+            return
+        msg = self.engine.live_balance_mgr.reset_tracking()
+        await update.message.reply_text(msg)
+
+    async def cmd_drawdown(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show risk tracking status (alert-only, never blocks trading)."""
+        if not self.engine:
+            await update.message.reply_text("❌ Engine not initialized")
+            return
+        mgr = self.engine.live_balance_mgr
+        lines = [
+            "📊 RISK TRACKING STATUS\n",
+            f"Balance: ${mgr.balance:.2f}",
+            f"Peak balance: ${mgr.peak_balance:.2f}",
+            f"Drawdown from peak: {mgr.drawdown_pct:.1f}%",
+            f"Daily PnL: {mgr.daily_pnl_pct:+.1f}%",
+            f"Alert sent: {'🟡 YES' if mgr._drawdown_alerted else '🟢 NO'}",
+            f"\n📊 CONSECUTIVE TRACKING",
+            f"Losses: {mgr._consecutive_losses} | Wins: {mgr._consecutive_wins}",
+            f"Size multiplier: {mgr._size_multiplier:.2f}×",
+            f"\nℹ️ Bot NEVER stops trading. Use /resume to reset tracking.",
+        ]
+        await update.message.reply_text('\n'.join(lines))
+
+    async def cmd_stratstats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show strategy win rate tracking stats."""
+        if not self.engine:
+            await update.message.reply_text("❌ Engine not initialized")
+            return
+        tracker = getattr(self.engine.dynamic_picker, 'tracker', None)
+        if not tracker or not tracker.records:
+            await update.message.reply_text("📊 No strategy data yet — need trade results first.")
+            return
+
+        lines = ["📊 STRATEGY WIN RATES\n"]
+        stats = tracker.get_stats()
+        # Sort by total trades descending
+        for name, s in sorted(stats.items(), key=lambda x: x[1]['total'], reverse=True):
+            emoji = '🟢' if s['win_rate'] >= 55 else '🔴' if s['win_rate'] < 45 else '🟡'
+            adj = s['adjustment']
+            adj_str = f"+{adj:.2f}" if adj >= 0 else f"{adj:.2f}"
+            lines.append(
+                f"{emoji} {name}: {s['wins']}W/{s['losses']}L "
+                f"({s['win_rate']:.0f}%) PnL:${s['pnl']:+.2f} adj:{adj_str}"
+            )
         await update.message.reply_text('\n'.join(lines))
 
     # ═══════════════════════════════════════════════════════════════════

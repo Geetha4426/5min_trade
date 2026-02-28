@@ -205,6 +205,10 @@ class LiveTrader:
             # Step 6: Check USDC allowance
             await self._check_allowance()
 
+            # Step 7: Startup cleanup — cancel all stale orders from previous session
+            # (Inspired by PolyFlup: prevents ghost orders from restarted bots)
+            await self._startup_cleanup()
+
             self._initialized = True
             print(f"✅ Live trader initialized successfully", flush=True)
             return True
@@ -440,6 +444,35 @@ class LiveTrader:
         except Exception as e:
             print(f"⚠️ Allowance check failed (non-fatal): {e}", flush=True)
 
+    async def _startup_cleanup(self):
+        """Cancel all open orders from previous sessions on startup.
+        
+        Prevents ghost orders that the bot lost track of after a restart.
+        Inspired by PolyFlup's startup position sync pattern.
+        """
+        try:
+            # Get all open orders from the CLOB
+            open_orders = self.clob_client.get_orders()
+            if not open_orders:
+                print(f"🧹 Startup cleanup: no stale orders found", flush=True)
+                return
+
+            # Filter for actually open orders
+            if isinstance(open_orders, list):
+                live_orders = [o for o in open_orders
+                              if o.get('status', '').lower() in ('live', 'open')]
+            else:
+                live_orders = []
+
+            if live_orders:
+                self.clob_client.cancel_all()
+                print(f"🧹 Startup cleanup: cancelled {len(live_orders)} stale orders", flush=True)
+            else:
+                print(f"🧹 Startup cleanup: no stale orders found", flush=True)
+        except Exception as e:
+            # Non-fatal — just log and continue
+            print(f"⚠️ Startup cleanup failed (non-fatal): {e}", flush=True)
+
     async def execute_signal(self, signal: TradeSignal) -> Optional[Dict]:
         """Execute a trade signal — FOK for instant fills, GTC for positioning.
         
@@ -555,10 +588,12 @@ class LiveTrader:
                     try:
                         self.clob_client.cancel(first.get('order_id', ''))
                         print(f"⚠️ Leg 2 failed, cancelled leg 1: {first['order_id']}", flush=True)
-                        self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
-                        self.balance_mgr.update_balance(self.balance_mgr.balance + first['size_usd'])
-                    except Exception:
-                        pass
+                    except Exception as cancel_err:
+                        # FOK orders fill instantly — can't cancel, need to track as orphan
+                        print(f"⚠️ Leg 2 failed, couldn't cancel leg 1 (FOK filled?): {cancel_err}", flush=True)
+                    # ALWAYS refund balance — even if cancel fails (position tracked separately)
+                    self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+                    self.balance_mgr.update_balance(self.balance_mgr.balance + first['size_usd'])
                     return None
 
         if results:
@@ -568,16 +603,26 @@ class LiveTrader:
     def _get_dynamic_fee_rate(self, price: float) -> float:
         """Calculate per-trade fee rate based on probability (price).
         
-        Polymarket's dynamic taker fees are highest near 50% and lowest
-        near the extremes (0% / 100%). The fee curve is approximately:
-            fee = BASE_FEE * 4 * price * (1 - price)
-        This peaks at price=0.50 and drops to ~0 at price=0.01 or 0.99.
+        Polymarket's REAL taker fee formula (post Feb 2026 update):
+            fee_rate = C × 0.25 × (p × (1−p))²
+        where C is a scaling constant calibrated so that at p=0.50
+        the fee equals BASE_TAKER_FEE_RATE (≈1.56%).
         
-        For 5m/15m crypto markets: BASE_FEE ~= 1.56% max at 50%.
+        At p=0.50: 0.25*(0.5*0.5)^2 = 0.015625 → C = BASE/0.015625
+        At p=0.10: 0.25*(0.1*0.9)^2 = 0.002025 → fee ≈ 0.20% (was 0.56% old formula!)
+        At p=0.05: 0.25*(0.05*0.95)^2 ≈ 0.000564 → fee ≈ 0.06% (was 0.30% old!)
+        
+        The old formula (4*p*(1-p)) was LINEAR and overestimated fees by 4-8x
+        at cheap price levels, causing the bot to SKIP profitable trades.
         """
-        # Fee curve: peaks at p=0.50, zero at p=0 and p=1
-        probability_factor = 4.0 * price * (1.0 - price)  # 0.0 at edges, 1.0 at 50%
-        fee = self.BASE_TAKER_FEE_RATE * probability_factor
+        p = max(0.001, min(0.999, price))
+        q = 1.0 - p
+        # Quadratic scaling: (p*q)^2 peaks at 0.0625 when p=0.5
+        pq_squared = (p * q) ** 2
+        # C calibrated so fee = BASE_TAKER_FEE_RATE at p=0.50
+        # At p=0.50: 0.25 * 0.0625 = 0.015625, so C = BASE / 0.015625
+        C = self.BASE_TAKER_FEE_RATE / 0.015625
+        fee = C * 0.25 * pq_squared
         return max(0.0, min(self.BASE_TAKER_FEE_RATE, fee))
 
     async def _place_buy(self, signal: TradeSignal, size: float, use_fok: bool = False) -> Optional[Dict]:
@@ -785,7 +830,11 @@ class LiveTrader:
         return await self._place_buy(signal, size, use_fok=False)
 
     async def _submit_order(self, token_id: str, price: float, shares: float, side, order_type=None) -> Optional[Dict]:
-        """Submit a signed order to the CLOB. Supports GTC, FOK, FAK."""
+        """Submit a signed order to the CLOB. Supports GTC, FOK, FAK.
+        
+        Runs synchronous py-clob-client calls in a thread executor to
+        avoid blocking the asyncio event loop (each call takes 1-20s).
+        """
         from py_clob_client.clob_types import OrderArgs, OrderType
         if order_type is None:
             order_type = OrderType.GTC
@@ -795,8 +844,13 @@ class LiveTrader:
             side=side,
             token_id=token_id,
         )
-        signed_order = self.clob_client.create_order(order_args)
-        return self.clob_client.post_order(signed_order, order_type)
+        loop = asyncio.get_event_loop()
+        signed_order = await loop.run_in_executor(
+            None, self.clob_client.create_order, order_args
+        )
+        return await loop.run_in_executor(
+            None, self.clob_client.post_order, signed_order, order_type
+        )
 
     async def check_pending_orders(self):
         """Check if pending orders have been filled, partially filled, or need cancellation."""
@@ -870,6 +924,41 @@ class LiveTrader:
         for tid in to_remove:
             self.pending_orders.pop(tid, None)
 
+        # ── Check pending GTC SELL orders on open positions ──
+        SELL_TIMEOUT = 120  # 2 minutes max for GTC sell to fill
+        for trade_id, pos in list(self.positions.items()):
+            pending_sell = pos.get('_pending_sell')
+            if not pending_sell:
+                continue
+            sell_order_id = pending_sell.get('order_id', '')
+            sell_placed_at = pending_sell.get('placed_at', now)
+            try:
+                sell_info = self.clob_client.get_order(sell_order_id)
+                if sell_info:
+                    sell_status = sell_info.get('status', '').lower()
+                    if sell_status in ('matched', 'filled'):
+                        fill_price = float(sell_info.get('price', pending_sell['sell_price']))
+                        pnl = (fill_price - pos['entry_price']) * pos.get('shares', 0)
+                        self._finalize_close(trade_id, fill_price, pnl, pending_sell.get('reason', 'gtc_sell'))
+                        print(f"🟢 GTC SELL FILLED: {pos.get('coin','')} {pos.get('direction','')} @ ${fill_price:.3f}", flush=True)
+                        continue
+                    elif sell_status == 'cancelled':
+                        # Sell was cancelled externally — remove tracking, position stays open
+                        del pos['_pending_sell']
+                        print(f"⚠️ GTC sell cancelled externally: {pos.get('coin','')}", flush=True)
+                        continue
+            except Exception:
+                pass
+
+            # Timeout: cancel GTC sell, position stays open for retry next cycle
+            if now - sell_placed_at > SELL_TIMEOUT:
+                try:
+                    self.clob_client.cancel(sell_order_id)
+                    print(f"⏰ GTC sell timeout — cancelled, will retry: {pos.get('coin','')}", flush=True)
+                except Exception:
+                    pass
+                del pos['_pending_sell']
+
     async def check_positions(self, current_prices: Dict[str, float],
                                 seconds_remaining_map: Dict[str, int] = None) -> List[Dict]:
         """Check open positions for exit signals."""
@@ -879,6 +968,10 @@ class LiveTrader:
         await self.check_pending_orders()
 
         for trade_id, pos in list(self.positions.items()):
+            # Skip positions that have a pending GTC sell order
+            if pos.get('_pending_sell'):
+                continue
+
             token_id = pos['token_id']
             current_price = current_prices.get(token_id)
             if current_price is None:
@@ -886,7 +979,9 @@ class LiveTrader:
 
             secs = seconds_remaining_map.get(pos.get('market_id', ''), 999)
 
-            decision = self._exit_decision(pos['entry_price'], current_price, secs)
+            # Use per-position fee rate (not global which gets overwritten per-trade)
+            pos_fee_rate = pos.get('fee_rate', self.TAKER_FEE_RATE)
+            decision = self._exit_decision(pos['entry_price'], current_price, secs, pos_fee_rate)
 
             if decision in ('sell', 'cut_loss'):
                 pnl = (current_price - pos['entry_price']) * pos.get('shares', 0)
@@ -898,15 +993,18 @@ class LiveTrader:
         return closed
 
     def _exit_decision(self, entry_price: float, current_price: float,
-                       seconds_remaining: int) -> str:
+                       seconds_remaining: int, fee_rate: float = None) -> str:
         """Exit decision based on current risk mode. Fee-aware."""
         if entry_price <= 0:
             return 'hold'
 
+        # Use per-position fee rate, fallback to global
+        fee = fee_rate if fee_rate is not None else self.TAKER_FEE_RATE
+
         # Fee-aware gain calculation: subtract taker fees from both legs
-        fee_cost = self.TAKER_FEE_RATE * 2  # entry + exit fee
+        fee_cost = fee * 2  # entry + exit fee
         raw_gain = current_price / entry_price
-        net_gain = (current_price * (1 - self.TAKER_FEE_RATE)) / (entry_price * (1 + self.TAKER_FEE_RATE))
+        net_gain = (current_price * (1 - fee)) / (entry_price * (1 + fee))
         pnl_pct = (net_gain - 1) * 100
 
         mode = self.balance_mgr.mode_name
@@ -1047,7 +1145,15 @@ class LiveTrader:
             resp2 = await self._submit_order(pos['token_id'], sell_price, sell_shares_gtc, SELL, OrderType.GTC)
 
             if resp2 and resp2.get('status') != 'error':
-                self._finalize_close(trade_id, exit_price, pnl, reason)
+                # GTC sell is QUEUED, not instantly filled — track as pending sell
+                sell_order_id = resp2.get('orderID', resp2.get('id', ''))
+                pos['_pending_sell'] = {
+                    'order_id': sell_order_id,
+                    'sell_price': sell_price,
+                    'placed_at': time.time(),
+                    'reason': reason,
+                }
+                print(f"📋 GTC SELL queued: {sell_order_id} — will confirm fill later", flush=True)
                 return True
 
             # ═══ Attempt 3: GTC sell 1¢ lower ═══
@@ -1056,8 +1162,15 @@ class LiveTrader:
             resp3 = await self._submit_order(pos['token_id'], retry_price, sell_shares_gtc, SELL, OrderType.GTC)
 
             if resp3 and resp3.get('status') != 'error':
-                adj_pnl = (retry_price - pos['entry_price']) * sell_shares_fok
-                self._finalize_close(trade_id, retry_price, adj_pnl, reason)
+                # GTC sell is QUEUED — track as pending sell
+                sell_order_id = resp3.get('orderID', resp3.get('id', ''))
+                pos['_pending_sell'] = {
+                    'order_id': sell_order_id,
+                    'sell_price': retry_price,
+                    'placed_at': time.time(),
+                    'reason': reason,
+                }
+                print(f"📋 GTC SELL queued (1¢ lower): {sell_order_id}", flush=True)
                 return True
 
             error_msg = resp3.get('errorMsg', 'Unknown') if resp3 else 'No response'
@@ -1121,7 +1234,7 @@ class LiveTrader:
 
     def _finalize_close(self, trade_id: str, exit_price: float,
                         pnl: float, reason: str):
-        """Finalize a closed position. Fee-aware PnL."""
+        """Finalize a closed position. Fee-aware PnL. Tracks consecutive wins/losses."""
         pos = self.positions.pop(trade_id, None)
         if not pos:
             return
@@ -1146,13 +1259,20 @@ class LiveTrader:
         self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
         self.balance_mgr.update_balance(self.balance_mgr.balance + pos['size_usd'] + net_pnl)
 
+        # ── Track consecutive wins/losses for dynamic sizing ──
+        won = net_pnl > 0
+        self.balance_mgr.record_result(won)
+
         gain = exit_price / pos['entry_price'] if pos['entry_price'] > 0 else 0
         emoji = '🤑' if net_pnl > 0 else '💸'
+        streak = (f"W{self.balance_mgr._consecutive_wins}" if won
+                  else f"L{self.balance_mgr._consecutive_losses}")
+        sizing = f"sizing×{self.balance_mgr._size_multiplier:.2f}"
         print(f"{emoji} LIVE CLOSED: {pos['coin']} {pos['direction']} — "
               f"Entry:${pos['entry_price']:.3f} -> Exit:${exit_price:.3f} | "
               f"Gross:${pnl:+.2f} Fees:${total_fees:.2f} Net:${net_pnl:+.2f} "
               f"({gain:.1f}x) [{reason}] | "
-              f"Bal:${self.balance_mgr.balance:.2f}", flush=True)
+              f"Bal:${self.balance_mgr.balance:.2f} {streak} {sizing}", flush=True)
 
     async def cancel_all_orders(self):
         """Emergency: cancel all pending orders."""

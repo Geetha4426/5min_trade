@@ -132,15 +132,17 @@ class Config:
     FLASH_DROP_THRESHOLD = float(os.getenv('FLASH_DROP_THRESHOLD', '0.25'))
     FLASH_LOOKBACK_SECONDS = int(os.getenv('FLASH_LOOKBACK_SECONDS', '15'))
 
-    # Dynamic taker fees (5m/15m crypto markets)
-    TAKER_FEE_RATE = float(os.getenv('TAKER_FEE_RATE', '0.0156'))  # ~1.56% at 50% prob
+    # Dynamic taker fees — peak rate at 50% probability
+    # Real formula: fee = C × 0.25 × (p×(1-p))² — quadratic, NOT linear
+    TAKER_FEE_RATE = float(os.getenv('TAKER_FEE_RATE', '0.0156'))  # ~1.56% peak at p=0.50
 
     # Oracle Arb
     ORACLE_PRICE_BUFFER = float(os.getenv('ORACLE_PRICE_BUFFER', '0.005'))  # 0.5%
     ORACLE_MIN_EDGE = float(os.getenv('ORACLE_MIN_EDGE', '0.10'))  # 10 cents mispricing
 
-    # YES+NO Arb
-    ARB_MAX_COMBINED_PRICE = float(os.getenv('ARB_MAX_COMBINED_PRICE', '0.98'))
+    # YES+NO Arb — max combined ask to enter (must leave room for fees+profit)
+    # At 50¢ each: fees ≈ 2×1.56% = 3.12% of $1 → need combined ≤ $0.93 for profit
+    ARB_MAX_COMBINED_PRICE = float(os.getenv('ARB_MAX_COMBINED_PRICE', '0.93'))
 
     # Time Decay
     DECAY_MAX_REMAINING_SECONDS = int(os.getenv('DECAY_MAX_REMAINING_SECONDS', '120'))

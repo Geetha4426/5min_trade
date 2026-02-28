@@ -187,15 +187,15 @@ class PolymarketFeed:
         lookback = Config.FLASH_LOOKBACK_SECONDS
         threshold = Config.FLASH_DROP_THRESHOLD
 
-        # Find price from lookback seconds ago
+        # Find the HIGHEST price in the lookback window (not just the first)
         cutoff = time.time() - lookback
-        old_price = None
+        old_price = 0.0
         for snap in history:
             if snap.timestamp >= cutoff:
-                old_price = snap.price
-                break
+                if snap.price > old_price:
+                    old_price = snap.price
 
-        if old_price is None or old_price <= 0:
+        if old_price <= 0:
             return
 
         drop = old_price - current.price

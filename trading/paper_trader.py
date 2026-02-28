@@ -33,9 +33,9 @@ class PaperTrader:
 
         size = self.risk.calculate_position_size(signal.timeframe, signal.confidence)
 
-        # Minimal slippage for cheap outcomes
+        # Realistic slippage: can be positive or negative (mostly against you)
         import random
-        slippage = random.uniform(0.001, 0.01)
+        slippage = random.uniform(-0.005, 0.015)  # -0.5% to +1.5% (skewed against)
         fill_price = signal.entry_price * (1 + slippage)
 
         shares = size / fill_price if fill_price > 0 else 0
@@ -145,25 +145,40 @@ class PaperTrader:
         if not pos:
             return
 
+        # Deduct estimated taker fees (entry + exit) using correct quadratic formula
+        entry_p = max(0.001, min(0.999, pos['entry_price']))
+        exit_p = max(0.001, min(0.999, exit_price))
+        C = 0.0156 / 0.015625  # calibrated for 1.56% at p=0.50
+        entry_fee_rate = C * 0.25 * (entry_p * (1 - entry_p)) ** 2
+        exit_fee_rate = C * 0.25 * (exit_p * (1 - exit_p)) ** 2
+        shares = pos.get('shares', 0)
+        entry_fee = pos['entry_price'] * shares * entry_fee_rate
+        exit_fee = exit_price * shares * exit_fee_rate
+        total_fees = entry_fee + exit_fee
+        net_pnl = pnl - total_fees
+
         pos['exit_price'] = exit_price
-        pos['pnl'] = pnl
-        pos['pnl_pct'] = (pnl / pos['size_usd'] * 100) if pos['size_usd'] > 0 else 0
+        pos['pnl_gross'] = pnl
+        pos['pnl'] = net_pnl
+        pos['fees'] = total_fees
+        pos['pnl_pct'] = (net_pnl / pos['size_usd'] * 100) if pos['size_usd'] > 0 else 0
         pos['exit_time'] = datetime.now().isoformat()
         pos['exit_reason'] = reason
         pos['status'] = 'closed'
 
         self.trade_history.append(pos)
         self.risk.open_positions = max(0, self.risk.open_positions - 1)
-        self.risk.record_trade_result(pnl, pnl > 0)
+        self.risk.record_trade_result(net_pnl, net_pnl > 0)
 
-        await self.db.close_trade(trade_id, exit_price, pnl, reason)
-        await self.db.update_strategy_stats(pos['strategy'], pnl > 0, pnl)
+        await self.db.close_trade(trade_id, exit_price, net_pnl, reason)
+        await self.db.update_strategy_stats(pos['strategy'], net_pnl > 0, net_pnl)
 
         gain = exit_price / pos['entry_price'] if pos['entry_price'] > 0 else 0
-        emoji = '🤑' if pnl > 0 else '💸'
+        emoji = '🤑' if net_pnl > 0 else '💸'
         print(f"{emoji} CLOSED: {pos['coin']} {pos['direction']} — "
               f"Entry:${pos['entry_price']:.3f} -> Exit:${exit_price:.3f} | "
-              f"${pnl:+.2f} ({gain:.1f}x) [{reason}] | "
+              f"Gross:${pnl:+.2f} Fees:${total_fees:.2f} Net:${net_pnl:+.2f} "
+              f"({gain:.1f}x) [{reason}] | "
               f"Bal:${self.risk.balance:.2f}", flush=True)
 
     def get_open_positions(self) -> List[Dict]:
