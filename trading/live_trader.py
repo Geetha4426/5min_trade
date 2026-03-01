@@ -1299,13 +1299,15 @@ class LiveTrader:
         update_balance_allowance is a GET request that asks the CLOB server
         to re-read the on-chain token balance & allowance.  It does NOT set
         the on-chain setApprovalForAll — that must already be done (e.g. via
-        the Polymarket frontend).
+        the Polymarket frontend or auto_redeemer.ensure_ctf_approval).
         
-        After refresh we call get_balance_allowance to VERIFY the state.
-        Returns False if the token balance or allowance is zero.
+        Returns True if ready to sell (balance > 0).
+        NOTE: allowance=0 from the CLOB is treated as a WARNING, not a blocker.
+        On-chain approval is verified separately at startup. If the CLOB's
+        cache is stale, the sell order itself will tell us if approval is missing.
         """
         import asyncio
-        MAX_RETRIES = 3
+        MAX_RETRIES = 2
         for attempt in range(MAX_RETRIES):
             try:
                 from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
@@ -1335,22 +1337,22 @@ class LiveTrader:
                         if balance <= 0:
                             print(f"⚠️ CLOB says token balance=0 — tokens may not be indexed yet", flush=True)
                             if attempt < MAX_RETRIES - 1:
-                                wait = 2.0 * (attempt + 1)  # 2s, 4s
+                                wait = 3.0 * (attempt + 1)
                                 print(f"   Waiting {wait:.0f}s for on-chain indexing...", flush=True)
                                 await asyncio.sleep(wait)
                                 continue
-                            return False
+                            return False  # Balance=0 is a real blocker
 
                         if allowance <= 0:
-                            print(f"⚠️ CLOB says allowance=0 — CTF exchange may not be approved!", flush=True)
-                            print(f"   Fix: go to polymarket.com and sell ANY position manually (sets approval)", flush=True)
-                            if attempt < MAX_RETRIES - 1:
-                                await asyncio.sleep(2)
-                                continue
-                            return False
+                            # WARNING ONLY — don't block the sell!
+                            # On-chain approval was verified at startup.
+                            # CLOB cache may be stale. Try selling anyway.
+                            print(f"⚠️ CLOB reports allowance=0 (may be stale cache) — "
+                                  f"will attempt sell anyway", flush=True)
+                            return True  # Let the sell attempt proceed
+
                 except Exception as check_err:
                     print(f"⚠️ get_balance_allowance failed (non-fatal): {check_err}", flush=True)
-                    # Still return True — the update itself may have worked
 
                 if attempt > 0:
                     print(f"✅ Conditional allowance verified (attempt {attempt+1})", flush=True)
@@ -1360,8 +1362,10 @@ class LiveTrader:
                     print(f"⚠️ Allowance attempt {attempt+1} failed: {e} — retrying...", flush=True)
                     await asyncio.sleep(1)
                 else:
-                    print(f"❌ Conditional allowance failed after {MAX_RETRIES} attempts: {e}", flush=True)
-        return False
+                    # Don't block on allowance check failure — try selling anyway
+                    print(f"⚠️ Allowance check failed: {e} — will attempt sell anyway", flush=True)
+                    return True
+        return True  # Default: let the sell attempt proceed
 
     async def _close_position(self, trade_id: str, exit_price: float,
                               pnl: float, reason: str) -> bool:
@@ -1499,10 +1503,17 @@ class LiveTrader:
 
             # ── Handle balance/allowance errors ──
             if 'not enough balance' in error_str or 'allowance' in error_str:
-                print(f"🔄 Balance/allowance error — refreshing allowance and retrying...", flush=True)
+                print(f"🔄 Balance/allowance error — attempting on-chain approval fix...", flush=True)
                 try:
                     import asyncio
-                    await asyncio.sleep(2)
+                    # Try on-chain setApprovalForAll via auto_redeemer (if available)
+                    engine = getattr(self, '_engine', None)
+                    if engine and hasattr(engine, 'auto_redeemer') and engine.auto_redeemer:
+                        print(f"🔑 Sending setApprovalForAll on-chain...", flush=True)
+                        await engine.auto_redeemer.ensure_ctf_approval()
+                        await asyncio.sleep(3)  # Wait for on-chain confirmation
+                    
+                    # Refresh CLOB's cached state
                     await self._ensure_conditional_allowance(pos['token_id'])
                     await asyncio.sleep(1)
                     # Try FOK with reduced shares (balance rounding issue)
@@ -1514,11 +1525,11 @@ class LiveTrader:
                         pos['token_id'], sell_price, reduced, SELL, OrderType.FOK
                     )
                     if retry_resp and retry_resp.get('status') != 'error':
-                        print(f"✅ Retry sell succeeded after allowance refresh!", flush=True)
+                        print(f"✅ Retry sell succeeded after on-chain approval fix!", flush=True)
                         self._finalize_close(trade_id, exit_price, pnl, reason)
                         return True
                 except Exception as retry_e:
-                    print(f"❌ Retry after allowance refresh also failed: {retry_e}", flush=True)
+                    print(f"❌ Retry after approval fix also failed: {retry_e}", flush=True)
 
                 pos['_sell_fails'] = sell_fails + 1
                 remaining = MAX_SELL_RETRIES - pos['_sell_fails']

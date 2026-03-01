@@ -713,12 +713,16 @@ class AutoRedeemer:
 
     # ─── CTF Exchange Approval ─────────────────────────────────────────
 
-    async def ensure_ctf_approval(self) -> bool:
+    async def ensure_ctf_approval(self, force: bool = False) -> bool:
         """Check and fix CTF exchange approval for selling.
 
         Sell orders require the CTF contract to have `setApprovalForAll`
         for both the Normal and NegRisk exchanges.  If not approved, this
         method sends the approval transactions on-chain via the Safe.
+
+        Args:
+            force: If True, send setApprovalForAll even if already approved.
+                   Useful when on-chain check says approved but CLOB disagrees.
 
         Returns True if all approvals are OK (already set or newly set).
         """
@@ -740,28 +744,33 @@ class AutoRedeemer:
         all_ok = True
         for label, exchange in EXCHANGES.items():
             try:
-                owner_pad = owner.lower().replace('0x', '').zfill(64)
-                op_pad = exchange.lower().replace('0x', '').zfill(64)
-                result = self._w3.eth.call({
-                    'to': CTF,
-                    'data': f'0xe985e9c5{owner_pad}{op_pad}',
-                })
-                approved = int.from_bytes(result, 'big') == 1
+                needs_approval = force
 
-                if approved:
-                    print(f"✅ CTF approval ({label}): approved", flush=True)
-                    continue
+                if not force:
+                    owner_pad = owner.lower().replace('0x', '').zfill(64)
+                    op_pad = exchange.lower().replace('0x', '').zfill(64)
+                    result = self._w3.eth.call({
+                        'to': CTF,
+                        'data': f'0xe985e9c5{owner_pad}{op_pad}',
+                    })
+                    approved = int.from_bytes(result, 'big') == 1
 
-                # Not approved — send setApprovalForAll(operator, true)
-                print(f"⚠️ CTF approval ({label}): NOT approved — fixing on-chain...",
-                      flush=True)
+                    if approved:
+                        print(f"✅ CTF approval ({label}): approved", flush=True)
+                        continue
+                    needs_approval = True
 
-                # setApprovalForAll(address,bool) selector = 0xa22cb465
-                selector = bytes.fromhex('a22cb465')
-                calldata = selector + encode(
-                    ['address', 'bool'],
-                    [Web3.to_checksum_address(exchange), True]
-                )
+                if needs_approval:
+                    action = "Force re-approving" if force else "NOT approved — fixing"
+                    print(f"⚠️ CTF approval ({label}): {action} on-chain...",
+                          flush=True)
+
+                    # setApprovalForAll(address,bool) selector = 0xa22cb465
+                    selector = bytes.fromhex('a22cb465')
+                    calldata = selector + encode(
+                        ['address', 'bool'],
+                        [Web3.to_checksum_address(exchange), True]
+                    )
 
                 if self._method == "direct":
                     ok = await self._execute_via_safe(

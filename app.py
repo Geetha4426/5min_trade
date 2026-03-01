@@ -162,10 +162,13 @@ class TradingEngine:
         try:
             await asyncio.sleep(3)
             if self.auto_redeemer:
-                print("🔑 Checking CTF exchange approvals...", flush=True)
-                await self.auto_redeemer.ensure_ctf_approval()
+                print("🔑 Force-sending CTF exchange approvals on-chain...", flush=True)
+                # Always force-send setApprovalForAll (idempotent, ~$0.001 gas)
+                # The on-chain isApprovedForAll check can disagree with the CLOB API,
+                # so we force-approve every startup to be safe.
+                await self.auto_redeemer.ensure_ctf_approval(force=True)
         except Exception as e:
-            print(f"⚠️ Startup approval check failed: {e}", flush=True)
+            print(f"⚠️ Startup approval failed: {e}", flush=True)
 
         # Then do the original redeem check
         await self._initial_redeem_check()
@@ -244,6 +247,9 @@ class TradingEngine:
             except Exception as e:
                 print(f"⚠️ Auto-redeem init failed: {e}", flush=True)
                 self.auto_redeemer = None
+
+            # Give live_trader a reference to the engine (for on-chain approval fix)
+            self.live_trader._engine = self
         else:
             print("📋 Paper trading only (no live credentials)", flush=True)
             self.trading_mode = 'paper'
