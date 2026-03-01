@@ -523,6 +523,12 @@ class LiveTrader:
 
         can_trade, reason = self.balance_mgr.can_trade()
         if not can_trade:
+            # Log WHY we can't trade (but not every single signal — throttle)
+            now = time.time()
+            if not hasattr(self, '_last_cant_trade_log') or now - self._last_cant_trade_log > 30:
+                self._last_cant_trade_log = now
+                print(f"⛔ Can't trade: {reason} | Balance: ${self.balance_mgr.balance:.2f} | "
+                      f"Signal: {signal.coin} {signal.direction} @ {signal.entry_price:.3f}", flush=True)
             return None
 
         size = self.balance_mgr.get_position_size(signal.confidence)

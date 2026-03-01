@@ -291,6 +291,40 @@ class LiveBalanceManager:
                 )
         return ''
 
+    def check_auto_demote(self) -> str:
+        """
+        Auto-demote to a lower tier if balance dropped below the current tier's entry.
+        Ensures the bot restarts in the correct mode after drawdowns.
+        
+        Demotion thresholds (reverse of graduation):
+          aggressive → medium  if balance < $100
+          medium → concentration  if balance < $20
+          concentration → seed  if balance < $5
+          seed stays seed (lowest tier)
+        """
+        DEMOTION = {
+            'aggressive': ('medium', 100.0),
+            'medium': ('concentration', 20.0),
+            'concentration': ('seed', 5.0),
+        }
+        demote = DEMOTION.get(self.mode_name)
+        if demote:
+            lower_mode, threshold = demote
+            if self.balance < threshold:
+                old_name = self.mode.name
+                self.set_mode(lower_mode)
+                # Recursively check if we need to demote further
+                # (e.g., aggressive with $3 should go all the way to seed)
+                further = self.check_auto_demote()
+                msg = (
+                    f"📉 AUTO-DEMOTE: {old_name} → {self.mode.emoji} {self.mode.name}\n"
+                    f"Balance ${self.balance:.2f} < ${threshold:.2f} threshold"
+                )
+                if further:
+                    msg += f"\n{further}"
+                return msg
+        return ''
+
     def get_strategy_filter(self) -> Dict:
         """Which strategies are enabled at this mode.
         

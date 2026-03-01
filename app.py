@@ -189,6 +189,22 @@ class TradingEngine:
             else:
                 print(f"⚠️ Using configured balance: ${self.live_balance_mgr.balance:.2f}", flush=True)
 
+            # Auto-demote mode if balance dropped below the tier's entry threshold
+            demote_msg = self.live_balance_mgr.check_auto_demote()
+            if demote_msg:
+                print(f"{demote_msg}", flush=True)
+
+            # Warn if balance is too low to trade at all
+            if self.live_balance_mgr.balance < Config.POLYMARKET_MIN_ORDER_SIZE:
+                print(f"\n{'='*60}", flush=True)
+                print(f"⚠️  BALANCE TOO LOW: ${self.live_balance_mgr.balance:.2f} < ${Config.POLYMARKET_MIN_ORDER_SIZE:.2f} minimum", flush=True)
+                print(f"   Signals will fire but NO trades can execute.", flush=True)
+                print(f"   Options:", flush=True)
+                print(f"   1. Deposit USDC at https://polymarket.com", flush=True)
+                print(f"   2. Set POLY_BUILDER_* env vars for auto-redeem of resolved positions", flush=True)
+                print(f"   3. Manually claim resolved positions on polymarket.com", flush=True)
+                print(f"{'='*60}\n", flush=True)
+
             # Initialize auto-redeemer for gasless position redemption
             try:
                 sig_type = getattr(self.live_trader, '_sig_type', 0)
@@ -284,6 +300,7 @@ class TradingEngine:
         print("🔄 Continuous scan loop started")
         scan_count = 0
         _last_pnl_report = time.time()
+        _last_balance_sync = time.time()
 
         while self.is_running:
             try:
@@ -402,6 +419,32 @@ class TradingEngine:
                     strat_name = trade.get('strategy', '')
                     if strat_name and hasattr(self.dynamic_picker, 'tracker'):
                         self.dynamic_picker.tracker.record(strat_name, pnl > 0, pnl)
+
+                # ── Periodic balance sync (every 60s) ──
+                # Picks up USDC from Polymarket auto-settlements, deposits, etc.
+                # Without this, bot stays stuck at $0 until restart
+                if self.trading_mode == 'live' and time.time() - _last_balance_sync >= 60:
+                    _last_balance_sync = time.time()
+                    try:
+                        real_bal = await self.live_trader.fetch_balance()
+                        if real_bal is not None and real_bal > 0:
+                            old_bal = self.live_balance_mgr.balance
+                            self.live_balance_mgr.update_balance(real_bal)
+                            # If balance changed significantly, log it
+                            if abs(real_bal - old_bal) >= 0.10:
+                                print(f"💰 Balance sync: ${old_bal:.2f} → ${real_bal:.2f}", flush=True)
+                                # Check if we should auto-demote or auto-graduate
+                                demote_msg = self.live_balance_mgr.check_auto_demote()
+                                if demote_msg:
+                                    print(f"📉 {demote_msg}", flush=True)
+                                    await self.bot.send_message(demote_msg)
+                                grad_msg = self.live_balance_mgr.check_auto_graduate()
+                                if grad_msg:
+                                    print(f"🎉 {grad_msg}", flush=True)
+                                    await self.bot.send_message(grad_msg)
+                    except Exception as e:
+                        if scan_count % 50 == 1:
+                            print(f"⚠️ Balance sync error: {e}", flush=True)
 
                 # ── Auto-redeem resolved positions ──
                 if self.auto_redeemer and self.trading_mode == 'live':
