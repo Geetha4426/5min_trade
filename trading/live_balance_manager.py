@@ -135,6 +135,10 @@ class LiveBalanceManager:
         self._consecutive_wins = 0
         self._size_multiplier = 1.0          # Dynamic bet size multiplier
 
+        # ── Cheap hunter mode override ──
+        # When True, relaxes position limits (up to 10) and forces $1 bets
+        self.cheap_hunter_mode = False
+
     def set_mode(self, mode: str):
         """Switch risk mode."""
         mode = mode.lower()
@@ -215,7 +219,15 @@ class LiveBalanceManager:
 
     @property
     def max_positions(self) -> int:
-        """Max positions based on balance and mode."""
+        """Max positions based on balance and mode.
+        
+        Cheap hunter mode: allows up to 10 positions regardless of SEED cap.
+        Normal mode: respects mode.max_positions_cap.
+        """
+        if self.cheap_hunter_mode:
+            # Allow many small lottery bets — the whole point is volume
+            by_balance = int(self.tradeable_balance / Config.POLYMARKET_MIN_ORDER_SIZE)
+            return max(1, min(by_balance, 10))
         # Dynamic: scale with balance, respect $1 min per position
         by_balance = int(self.tradeable_balance * self.mode.max_pos_per_dollar)
         by_min_size = int(self.tradeable_balance / Config.POLYMARKET_MIN_ORDER_SIZE)
@@ -250,10 +262,19 @@ class LiveBalanceManager:
         Calculate position size. Dynamic based on balance, mode, confidence,
         and consecutive loss multiplier.
         
+        Cheap hunter mode: fixed $1 per bet (the whole strategy is to spread
+        small bets across many markets).
+        
         After consecutive losses, sizes gently shrink by 5% each.
         After consecutive wins, sizes grow by 5% each (capped at 130%).
         Always returns at least $1 (Polymarket minimum) or 0 if can't trade.
         """
+        min_size = Config.POLYMARKET_MIN_ORDER_SIZE
+
+        # Cheap hunter: fixed $1 bets — never risk more per lottery ticket
+        if self.cheap_hunter_mode:
+            return min_size if self.tradeable_balance >= min_size else 0
+
         # Scale bet size with confidence
         pct = self.mode.max_bet_pct * (0.5 + confidence * 0.5)
         size = self.tradeable_balance * pct / 100
@@ -262,7 +283,6 @@ class LiveBalanceManager:
         size *= self._size_multiplier
 
         # Enforce Polymarket minimum
-        min_size = Config.POLYMARKET_MIN_ORDER_SIZE
         max_size = self.tradeable_balance * 0.50  # Never more than 50% of tradeable
 
         size = max(min_size, min(size, max_size))
@@ -329,13 +349,18 @@ class LiveBalanceManager:
         """Which strategies are enabled at this mode.
         
         ALL modes enable ALL strategies — the confidence floor is the ONLY filter.
-        Each strategy's confidence formula already encodes its risk level.
-        A 0.90 confidence mean_reversion is just as safe as a 0.90 arb.
-        No arbitrary strategy whitelists — let the math decide.
+        EXCEPT: SEED mode explicitly blocks lottery/penny strategies.
+        With $1-5 capital, a single penny loss wipes you out.
+        cheap_hunter and penny_sniper belong in concentration+ modes.
         """
+        disabled = []
+        if self.mode_name == 'seed':
+            # SEED = capital preservation. Lottery bets are the opposite of that.
+            disabled = ['cheap_hunter', 'penny_sniper']
+
         return {
             'enabled': 'all',
-            'disabled': [],
+            'disabled': disabled,
             'min_confidence': self.mode.min_confidence,
         }
 

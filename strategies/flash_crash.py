@@ -1,16 +1,20 @@
-"""
-Cheap Outcome Hunter — The Core Strategy
+"""Cheap Outcome Hunter — Smart Lottery Strategy
 
 THE EDGE: In 5-minute crypto markets, probabilities swing wildly.
-When one side drops to $0.01-0.05, buying it is a lottery ticket
-that pays $1.00 if it hits. Buy BOTH sides when both are cheap.
+Buying a side at $0.01-0.06 is a lottery ticket that pays $1.00.
 
-Logic:
-1. Scan all active markets every few seconds
-2. If Up OR Down is at 1-8 cents → BUY IT (potential 12-100x)
-3. If BOTH sides are cheap (combined < $0.25) → BUY BOTH (guaranteed-ish profit)
-4. Hold dynamically: ride to $1.00, or sell at 3x+, or cut at -16%
-5. Trade FREQUENTLY — volume is king
+BUT: most cheap prices are cheap FOR A REASON — the market has already
+decided. The old version bought EVERY cheap outcome and got destroyed.
+
+SMART RULES:
+1. BOTH sides cheap (combined < $0.25) → genuine arb, BUY BOTH
+2. Single side cheap → ONLY buy if there's genuine uncertainty:
+   - Opposite side must be < $0.80 (market hasn't fully decided)
+   - At least 90 seconds remaining (enough time for reversal)
+   - Real liquidity ($1+ depth) so we can actually exit
+   - Price isn't stale (someone is actually trading this market)
+3. The math: lose $1 on 10 bets = -$10. 1 winner at $0.01→$1 = +$90 net.
+   But ONLY if we pick bets with real upside, not already-decided markets.
 """
 
 import time
@@ -22,13 +26,17 @@ class CheapOutcomeHunter(BaseStrategy):
     """Buy dirt-cheap outcomes for massive potential returns."""
 
     name = "cheap_hunter"
-    description = "Buys outcomes at 1-8 cents for 12-100x potential returns"
+    description = "Smart lottery bets — cheap outcomes with genuine uncertainty"
 
-    # THRESHOLDS
-    MAX_BUY_PRICE = 0.08        # Buy anything under 8 cents
+    # THRESHOLDS (tightened to reduce false signals)
+    MAX_BUY_PRICE = 0.06        # Max 6 cents (was 8 — too loose)
     SWEET_SPOT_MAX = 0.03       # 1-3 cents = highest confidence
     BOTH_SIDES_MAX = 0.25       # If Up + Down < 25 cents, buy BOTH
     MIN_BUY_PRICE = 0.005       # Below half a cent = no liquidity
+    OPPOSITE_MAX = 0.80         # Opposite side must be < 80¢ (market not decided)
+    MIN_DEPTH = 1.00            # Need $1+ depth to exit (was $0.50)
+    MIN_TIME_SINGLE = 90        # 90s minimum for single-side (was 45)
+    MIN_TIME_BOTH = 45          # 45s minimum for both-sides arb
 
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         clob = context.get('clob')
@@ -37,8 +45,10 @@ class CheapOutcomeHunter(BaseStrategy):
         if not clob:
             return None
 
-        # Skip last 5 seconds — settlement chaos
-        if seconds_remaining < 5:
+        # Skip markets too close to expiry — prices are decided by then.
+        # BOTH_SIDES arb uses a shorter window (45s) because it's genuine arbitrage.
+        # Single-side lottery needs 90s+ for any chance of reversal.
+        if seconds_remaining < self.MIN_TIME_BOTH:
             return None
 
         up_token = market.get('up_token_id', '')
@@ -84,54 +94,80 @@ class CheapOutcomeHunter(BaseStrategy):
             )
 
         # ═══════════════════════════════════════════════════════════
-        # STRATEGY 2: Buy the cheap side (lottery ticket)
+        # STRATEGY 2: Buy the cheap side (smart lottery ticket)
+        # Only when there's GENUINE UNCERTAINTY — not when market decided
         # ═══════════════════════════════════════════════════════════
-        for side, ask_price, token_id in [
-            ('UP', up_ask, up_token),
-            ('DOWN', down_ask, down_token),
+
+        # Need more time for single-side bets — 90s minimum
+        if seconds_remaining < self.MIN_TIME_SINGLE:
+            return None
+
+        for side, ask_price, token_id, opposite_ask in [
+            ('UP', up_ask, up_token, down_ask),
+            ('DOWN', down_ask, down_token, up_ask),
         ]:
-            if self.MIN_BUY_PRICE < ask_price <= self.MAX_BUY_PRICE:
-                # Cheap outcome found!
-                potential_return = 1.0 / ask_price  # e.g. $0.02 → 50x
+            if not (self.MIN_BUY_PRICE < ask_price <= self.MAX_BUY_PRICE):
+                continue
 
-                # Higher confidence for cheaper prices
-                if ask_price <= self.SWEET_SPOT_MAX:
-                    confidence = 0.80  # Sweet spot: 1-3 cents
-                elif ask_price <= 0.05:
-                    confidence = 0.70  # Good: 3-5 cents
-                else:
-                    confidence = 0.60  # OK: 5-8 cents
+            # ── KEY CHECK: Is the market genuinely uncertain? ──
+            # If opposite side is $0.85+, this side is cheap because it's LOSING.
+            # No point buying a 2¢ token when the other side is 95¢ — it's decided.
+            # Only buy when opposite is < 80¢ (real uncertainty remains).
+            if opposite_ask >= self.OPPOSITE_MAX:
+                continue
 
-                # Boost confidence in last 2 minutes (more volatility = more swings)
-                if seconds_remaining < 120:
-                    confidence = min(0.95, confidence + 0.10)
+            # Check there's real liquidity to fill AND exit
+            book = up_book if side == 'UP' else down_book
+            if book['ask_depth'] < self.MIN_DEPTH:
+                continue
 
-                # Check there's liquidity to actually fill
-                book = up_book if side == 'UP' else down_book
-                if book['ask_depth'] < 0.50:  # Need at least 50 cents depth
-                    continue
+            potential_return = 1.0 / ask_price  # e.g. $0.02 → 50x
 
-                return TradeSignal(
-                    strategy=self.name,
-                    coin=market['coin'],
-                    timeframe=market['timeframe'],
-                    direction=side,
-                    token_id=token_id,
-                    market_id=market['market_id'],
-                    entry_price=ask_price,
-                    confidence=confidence,
-                    rationale=(
-                        f"🎰 CHEAP {side}: {market['coin']} {side} "
-                        f"@${ask_price:.3f} = {potential_return:.0f}x potential! "
-                        f"Time left: {seconds_remaining}s"
-                    ),
-                    metadata={
-                        'ask_price': ask_price,
-                        'potential_return': potential_return,
-                        'type': 'cheap_single',
-                        'seconds_remaining': seconds_remaining,
-                    }
-                )
+            # Confidence based on price + uncertainty level
+            # Lower opposite = more genuine uncertainty = higher confidence
+            uncertainty = 1.0 - opposite_ask  # 0.0 = no uncertainty, 1.0 = max
+
+            if ask_price <= self.SWEET_SPOT_MAX:
+                base_conf = 0.65
+            elif ask_price <= 0.05:
+                base_conf = 0.55
+            else:
+                base_conf = 0.45
+
+            # Boost for genuine uncertainty (opposite side also cheap)
+            # E.g., UP=0.03, DOWN=0.40 → uncertainty=0.60 → +0.12
+            uncertainty_boost = uncertainty * 0.20
+            confidence = min(0.78, base_conf + uncertainty_boost)
+
+            # Reduce confidence for very short time remaining
+            if seconds_remaining < 120:
+                confidence *= 0.90  # 10% penalty — less time to recover
+
+            return TradeSignal(
+                strategy=self.name,
+                coin=market['coin'],
+                timeframe=market['timeframe'],
+                direction=side,
+                token_id=token_id,
+                market_id=market['market_id'],
+                entry_price=ask_price,
+                confidence=round(confidence, 3),
+                rationale=(
+                    f"🎰 CHEAP {side}: {market['coin']} {side} "
+                    f"@${ask_price:.3f} = {potential_return:.0f}x potential! "
+                    f"Opposite: ${opposite_ask:.2f} (uncertainty: {uncertainty:.0%}) "
+                    f"Time: {seconds_remaining}s"
+                ),
+                metadata={
+                    'ask_price': ask_price,
+                    'opposite_ask': opposite_ask,
+                    'uncertainty': uncertainty,
+                    'potential_return': potential_return,
+                    'type': 'cheap_single',
+                    'seconds_remaining': seconds_remaining,
+                    'is_lottery': True,
+                }
+            )
 
         return None
 

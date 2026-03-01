@@ -184,9 +184,9 @@ class DynamicPicker(BaseStrategy):
             elif sig_type == 'both_sides':
                 s.confidence = min(0.99, s.confidence + 0.20)
             elif sig_type == 'cheap_single':
-                s.confidence = min(0.95, s.confidence + 0.10)
+                s.confidence = min(0.82, s.confidence + 0.05)  # Mild boost, stays under SEED 0.90
             elif s.metadata.get('is_penny_bet'):
-                s.confidence = min(0.85, s.confidence + 0.05)  # Don't over-prioritize
+                s.confidence = min(0.82, s.confidence + 0.05)  # Same: don't push pennies into SEED
             elif sig_type == 'prob_closer':
                 s.confidence = min(0.95, s.confidence + 0.15)  # High priority for safe returns
             elif sig_type == 'mean_reversion':

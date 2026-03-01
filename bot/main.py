@@ -62,6 +62,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("resume", self.cmd_resume))
         self.app.add_handler(CommandHandler("drawdown", self.cmd_drawdown))
         self.app.add_handler(CommandHandler("stratstats", self.cmd_stratstats))
+        self.app.add_handler(CommandHandler("cheaphunter", self.cmd_cheaphunter))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -87,6 +88,7 @@ class TelegramBot:
                 BotCommand("markets", "Scan live markets"),
                 BotCommand("estop", "Emergency stop"),
                 BotCommand("seed", "$1 start — arb-only seed mode"),
+                BotCommand("cheaphunter", "🎰 Lottery ticket mode — $1 bets across all TFs"),
                 BotCommand("history", "Trade history"),
                 BotCommand("settings", "Bot settings"),
             ])
@@ -136,6 +138,7 @@ class TelegramBot:
             f"  💰 YES+NO Arb — Guaranteed profit\n"
             f"  🎯 Oracle Arb — Binance edge\n"
             f"  ⏰ Time Decay — Near-expiry\n\n"
+            f"🎰 /cheaphunter — Lottery ticket mode ($1 bets)\n\n"
             f"Use the menu below or type /trade to start!"
         )
         await update.message.reply_text(text, parse_mode='Markdown',
@@ -653,6 +656,82 @@ class TelegramBot:
                 f"({s['win_rate']:.0f}%) PnL:${s['pnl']:+.2f} adj:{adj_str}"
             )
         await update.message.reply_text('\n'.join(lines))
+
+    async def cmd_cheaphunter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle Cheap Hunter lottery mode.
+        
+        When ON: scans ALL timeframes (5, 15, 30) with ONLY cheap_hunter
+        and penny_sniper strategies. Fixed $1 bets, up to 10 positions.
+        
+        The math: lose $1 on 10 markets = -$10. Win $100 on 1 = +$90 net.
+        
+        Usage: /cheaphunter — toggles on/off
+        """
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not initialized")
+            return
+
+        if not self.engine.live_trader.is_ready:
+            await update.message.reply_text(
+                "❌ Live trading not configured!\n"
+                "Set POLY_PRIVATE_KEY first, then /cheaphunter"
+            )
+            return
+
+        # Toggle mode
+        if self.engine.cheap_hunter_mode:
+            # TURN OFF
+            self.engine.cheap_hunter_mode = False
+            self.engine.live_balance_mgr.cheap_hunter_mode = False
+            # Restore previous timeframes
+            if self.engine._cheap_hunter_prev_timeframes:
+                self.engine.active_timeframes = self.engine._cheap_hunter_prev_timeframes
+                self.engine._cheap_hunter_prev_timeframes = None
+
+            msg = (
+                "🎰 CHEAP HUNTER MODE: OFF\n\n"
+                "Restored normal trading.\n"
+                f"Timeframes: {self.engine.active_timeframes}\n"
+                f"Mode: {self.engine.live_balance_mgr.mode.emoji} "
+                f"{self.engine.live_balance_mgr.mode.name}"
+            )
+        else:
+            # TURN ON
+            self.engine._cheap_hunter_prev_timeframes = list(self.engine.active_timeframes)
+            self.engine.active_timeframes = [5, 15, 30]  # All timeframes
+            self.engine.cheap_hunter_mode = True
+            self.engine.live_balance_mgr.cheap_hunter_mode = True
+
+            # Auto-switch to live mode
+            if self.engine.trading_mode != 'live':
+                self.engine.trading_mode = 'live'
+
+            # Start trading if not already
+            if not self.engine.is_running:
+                await self.engine.start()
+
+            bal = self.engine.live_balance_mgr.balance
+            max_bets = int(bal / 1.0) if bal >= 1.0 else 0
+
+            msg = (
+                f"🎰 CHEAP HUNTER MODE: ON\n\n"
+                f"💰 Balance: ${bal:.2f} — up to {max_bets} simultaneous $1 bets\n"
+                f"⏱️ Timeframes: 5min, 15min, 30min\n"
+                f"🧠 Strategies: cheap_hunter + penny_sniper ONLY\n"
+                f"💵 Bet size: $1 per market (fixed)\n"
+                f"📊 Position limit: 10 max\n\n"
+                f"📐 THE MATH:\n"
+                f"  • Buy outcomes at $0.01-$0.08\n"
+                f"  • Lose $1 on 10 markets = -$10\n"
+                f"  • 1 winner pays $1.00 per share\n"
+                f"  • $0.01 → $1.00 = 100x ($100 on $1)\n"
+                f"  • Net: +$90 if 1-in-11 hits\n\n"
+                f"⚠️ Safety: No buying in last 45 seconds\n"
+                f"    (market already decided by then)\n\n"
+                f"Use /cheaphunter again to turn OFF"
+            )
+
+        await update.message.reply_text(msg)
 
     # ═══════════════════════════════════════════════════════════════════
     # CALLBACKS

@@ -1091,59 +1091,103 @@ class LiveTrader:
 
     def _exit_decision(self, entry_price: float, current_price: float,
                        seconds_remaining: int, fee_rate: float = None) -> str:
-        """Exit decision based on current risk mode. Fee-aware."""
+        """Dynamic exit decision for 5-minute binary markets.
+        
+        These markets resolve to $1 (win) or $0 (lose). Prices are probabilities.
+        
+        Strategy:
+          - High-probability entries (>0.80): Hold for settlement ($1 payout)
+            unless price reverses significantly → then cut loss
+          - Mid-probability entries: Use trailing profit targets + time-decay
+          - Near expiry: If profitable net of fees, take it. If losing, cut.
+          - Always cut if loss exceeds mode threshold to protect capital.
+        """
         if entry_price <= 0:
             return 'hold'
 
         # Use per-position fee rate, fallback to global
         fee = fee_rate if fee_rate is not None else self.TAKER_FEE_RATE
 
-        # Fee-aware gain calculation: subtract taker fees from both legs
-        fee_cost = fee * 2  # entry + exit fee
-        raw_gain = current_price / entry_price
+        # Fee-aware calculations
         net_gain = (current_price * (1 - fee)) / (entry_price * (1 + fee))
         pnl_pct = (net_gain - 1) * 100
+        
+        # How much could we gain if we hold to settlement ($1)?
+        max_payout_gain = (1.0 * (1 - fee)) / (entry_price * (1 + fee))
+        # How much current gain as fraction of max possible
+        gain_captured = (net_gain - 1) / (max_payout_gain - 1) if max_payout_gain > 1 else 0
 
         mode = self.balance_mgr.mode_name
 
-        if mode == 'seed':
-            # SEED MODE: Very conservative — protect capital at all costs
-            if net_gain >= 1.4:  # Take profit at 40% net gain
-                return 'sell'
-            if net_gain >= 1.15 and seconds_remaining < 20:
-                return 'sell'
-            if pnl_pct <= -12:  # Tight stop loss (account for fees)
-                return 'cut_loss'
-        elif mode == 'concentration':
-            if net_gain >= 1.8:
-                return 'sell'
-            if net_gain >= 1.4 and seconds_remaining < 30:
-                return 'sell'
-            if pnl_pct <= -18:
-                return 'cut_loss'
-        elif mode == 'medium':
-            if net_gain >= 2.5:
-                return 'sell'
-            if net_gain >= 1.8 and seconds_remaining < 45:
-                return 'sell'
-            if pnl_pct <= -22:
-                return 'cut_loss'
-        else:  # aggressive
-            if net_gain >= 4.0:
-                return 'sell'
-            if net_gain >= 2.5 and seconds_remaining < 60:
-                return 'sell'
-            if pnl_pct <= -28:
-                return 'cut_loss'
+        # ── Mode-specific stop-loss thresholds (tighter = safer) ──
+        stop_loss = {'seed': -10, 'concentration': -15, 'medium': -20, 'aggressive': -25}
+        max_loss = stop_loss.get(mode, -15)
 
-        # Near expiry: if we're in profit net of fees, take it
-        if seconds_remaining < 15 and pnl_pct > 5:
-            return 'sell'
+        # ── Hard stop loss — always respect ──
+        if pnl_pct <= max_loss:
+            return 'cut_loss'
 
-        # Hold penny bets through expiry (let them settle)
-        if seconds_remaining < 15 and entry_price < 0.15:
+        # ── HIGH-PROBABILITY entry (>$0.80): Hold for $1 settlement ──
+        if entry_price >= 0.80:
+            # Already captured 70%+ of max gain, and time running out → take profit
+            if gain_captured >= 0.70 and seconds_remaining < 30:
+                return 'sell'
+            # Price reversed below entry → market is turning against us
+            if current_price < entry_price * 0.92 and seconds_remaining > 30:
+                return 'cut_loss'
+            # Near expiry and still profitable → sell (don't risk last-second reversal)
+            if seconds_remaining < 10 and pnl_pct > 2:
+                return 'sell'
+            # Otherwise hold — let it settle at $1
             return 'hold'
 
+        # ── MID-PROBABILITY entry ($0.30-$0.80): Dynamic targets ──
+        if entry_price >= 0.30:
+            # Big move in our favor — take some profit based on time left
+            if seconds_remaining > 60:
+                # Lots of time left — need bigger moves to exit early
+                if pnl_pct >= 30:
+                    return 'sell'
+            elif seconds_remaining > 20:
+                # Getting close to expiry — lower the bar
+                if pnl_pct >= 15:
+                    return 'sell'
+            else:
+                # Last 20 seconds — any profit is good
+                if pnl_pct > 3:
+                    return 'sell'
+            
+            # Time running out and losing → cut before settlement
+            if seconds_remaining < 20 and pnl_pct < -5:
+                return 'cut_loss'
+            
+            return 'hold'
+
+        # ── CHEAP entry (<$0.30): Lottery tickets — smart profit taking ──
+        # The math: lose $1 on 10 markets = -$10. Win $100 on 1 = +$90 net.
+        # But DON'T always hold to $1 — take profit at multiples to lock gains.
+
+        if entry_price < 0.05:
+            # Ultra-cheap penny bets ($0.01-$0.05): let them run further
+            if pnl_pct >= 400:       # 5x+ (e.g., $0.01 → $0.05): bank it
+                return 'sell'
+            if pnl_pct >= 200 and seconds_remaining < 30:  # 3x near expiry
+                return 'sell'
+            if seconds_remaining < 10 and pnl_pct > 30:    # Last moments, any decent gain
+                return 'sell'
+        else:
+            # Cheap but not penny ($0.05-$0.30)
+            if pnl_pct >= 150:       # 2.5x → take profit
+                return 'sell'
+            if pnl_pct >= 80 and seconds_remaining < 30:   # Near expiry, ~2x
+                return 'sell'
+            if seconds_remaining < 10 and pnl_pct > 20:
+                return 'sell'
+            # Cut losers closer to expiry if deep in the red
+            if seconds_remaining < 20 and pnl_pct < -30:
+                return 'cut_loss'
+
+        # Let cheap bets ride — they settle to $1 or $0
         return 'hold'
 
     async def _ensure_conditional_allowance(self, token_id: str) -> bool:

@@ -100,6 +100,13 @@ class TradingEngine:
         self._scan_task = None
         self._ws_tasks = []
 
+        # ── Cheap Hunter dedicated mode ──
+        # When True: only runs cheap_hunter + penny_sniper, all timeframes,
+        # $1 per bet, up to 10 positions. The math: lose $1 on 10 bets = -$10,
+        # but 1 win at $1→$100 = +$90 net. Toggled via /cheaphunter command.
+        self.cheap_hunter_mode = False
+        self._cheap_hunter_prev_timeframes = None  # Restore when mode exits
+
     @property
     def active_trader(self):
         """Returns the currently active trader (paper or live)."""
@@ -319,9 +326,24 @@ class TradingEngine:
                 else:
                     balance_prefs = self.risk_manager.get_balance_preferences()
 
+                # ── Cheap Hunter Mode overrides ──
+                if self.cheap_hunter_mode:
+                    balance_prefs = {
+                        'enabled': ['cheap_hunter', 'penny_sniper'],
+                        'disabled': [],
+                        'min_confidence': 0.40,  # Low bar — these are lottery tickets
+                    }
+
                 # Log status periodically
                 if scan_count % 50 == 1:
-                    if self.trading_mode == 'live':
+                    if self.cheap_hunter_mode:
+                        bal = self.live_balance_mgr.balance
+                        pos = self.live_balance_mgr.open_positions
+                        print(f"🎰 [CHEAP HUNTER] "
+                              f"Balance: ${bal:.2f} | "
+                              f"Positions: {pos}/10 | "
+                              f"Markets: {len(markets)}")
+                    elif self.trading_mode == 'live':
                         m = self.live_balance_mgr.mode
                         bal = self.live_balance_mgr.balance
                         print(f"📊 [{m.emoji} {m.name}] "

@@ -106,11 +106,13 @@ class MeanReversionScalper(BaseStrategy):
             potential_return = bounce_target / ask if ask > 0 else 0
 
             # Confidence: bigger drop + more stable bottom = higher
-            confidence = min(0.90, 0.55 + drop * 1.5)
+            confidence = min(0.85, 0.55 + drop * 1.5)
 
-            # Boost if we have very cheap entry + big drop
+            # Boost if we have very cheap entry + big drop (but cap at 0.88
+            # to stay below SEED's 0.90 confidence floor — ultra-cheap mean
+            # reversion is still a lottery bet, not a high-conviction arb)
             if current < 0.10 and drop > 0.40:
-                confidence = min(0.95, confidence + 0.10)
+                confidence = min(0.88, confidence + 0.08)
 
             return TradeSignal(
                 strategy=self.name,
