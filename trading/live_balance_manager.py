@@ -349,14 +349,15 @@ class LiveBalanceManager:
         """Which strategies are enabled at this mode.
         
         ALL modes enable ALL strategies — the confidence floor is the ONLY filter.
-        EXCEPT: SEED mode explicitly blocks lottery/penny strategies.
-        With $1-5 capital, a single penny loss wipes you out.
-        cheap_hunter and penny_sniper belong in concentration+ modes.
+        EXCEPT: SEED mode explicitly blocks high-risk strategies:
+        - cheap_hunter / penny_sniper: lottery bets that can wipe out $1-5
+        - prob_closer: pays $0.90-0.95 for 5-10% discount — one loss = -40% of
+          SEED balance.  Terrible risk/reward at <$5.
         """
         disabled = []
         if self.mode_name == 'seed':
-            # SEED = capital preservation. Lottery bets are the opposite of that.
-            disabled = ['cheap_hunter', 'penny_sniper']
+            # SEED = capital preservation. Block strategies with bad risk/reward.
+            disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer']
 
         return {
             'enabled': 'all',

@@ -218,6 +218,9 @@ class LiveTrader:
             # Step 6: Check USDC allowance
             await self._check_allowance()
 
+            # Step 6b: Check on-chain CTF approval for sell orders
+            await self._check_ctf_approval()
+
             # Step 7: Startup cleanup — cancel all stale orders from previous session
             # (Inspired by PolyFlup: prevents ghost orders from restarted bots)
             await self._startup_cleanup()
@@ -477,6 +480,70 @@ class LiveTrader:
                         print(f"✅ USDC allowance: ${allowance:.2f}", flush=True)
         except Exception as e:
             print(f"⚠️ Allowance check failed (non-fatal): {e}", flush=True)
+
+    async def _check_ctf_approval(self):
+        """Check on-chain setApprovalForAll for both exchange contracts.
+        
+        Sell orders REQUIRE the CTF conditional token contract to be approved
+        for the exchange that is executing the trade.  There are two exchanges:
+          - Normal:   0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E
+          - NegRisk:  0xC5d563A36AE78145C45a50134d48A1215220f80a
+        
+        Crypto markets (BTC/ETH/SOL) use neg_risk.  If the proxy wallet hasn't
+        approved the exchange, EVERY sell order will fail with
+        'not enough balance / allowance'.
+        """
+        try:
+            from config import Config
+            rpcs = getattr(Config, 'POLYGON_RPC_URLS', None)
+            if not rpcs:
+                return
+            rpc_list = [r.strip() for r in rpcs.split(',') if r.strip()] if isinstance(rpcs, str) else rpcs
+            if not rpc_list:
+                return
+
+            funder = Config.get_funder_address()
+            if not funder:
+                # EOA wallet — the signing address IS the funder
+                from eth_account import Account
+                acct = Account.from_key(Config.POLY_PRIVATE_KEY)
+                funder = acct.address
+
+            import requests
+            CTF_CONTRACT = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045'
+            EXCHANGES = {
+                'Normal':  '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E',
+                'NegRisk': '0xC5d563A36AE78145C45a50134d48A1215220f80a',
+            }
+            # isApprovedForAll(address owner, address operator) → bool
+            # selector = 0xe985e9c5
+            for label, exchange in EXCHANGES.items():
+                try:
+                    owner_padded = funder.lower().replace('0x', '').zfill(64)
+                    operator_padded = exchange.lower().replace('0x', '').zfill(64)
+                    data = f'0xe985e9c5{owner_padded}{operator_padded}'
+                    payload = {
+                        'jsonrpc': '2.0', 'method': 'eth_call', 'id': 1,
+                        'params': [{'to': CTF_CONTRACT, 'data': data}, 'latest']
+                    }
+                    resp = requests.post(rpc_list[0], json=payload, timeout=10)
+                    if resp.status_code == 200:
+                        result = resp.json().get('result', '0x0')
+                        approved = int(result, 16) == 1 if result else False
+                        if approved:
+                            print(f"✅ CTF approval ({label} exchange): approved", flush=True)
+                        else:
+                            print(f"\n{'='*60}", flush=True)
+                            print(f"❌ CTF approval ({label} exchange): NOT APPROVED!", flush=True)
+                            print(f"   Sells on {label} markets will fail!", flush=True)
+                            print(f"   Fix: go to polymarket.com → sell ANY position → this sets approval", flush=True)
+                            print(f"   Owner: {funder}", flush=True)
+                            print(f"   Exchange: {exchange}", flush=True)
+                            print(f"{'='*60}\n", flush=True)
+                except Exception as ex:
+                    print(f"⚠️ CTF approval check ({label}) failed: {ex}", flush=True)
+        except Exception as e:
+            print(f"⚠️ CTF approval check skipped: {e}", flush=True)
 
     async def _startup_cleanup(self):
         """Cancel all open orders from previous sessions on startup.
@@ -1226,17 +1293,18 @@ class LiveTrader:
         return 'hold'
 
     async def _ensure_conditional_allowance(self, token_id: str) -> bool:
-        """Set conditional token allowance before selling.
+        """Refresh & verify conditional token allowance before selling.
         
-        Proxy wallets (sig_type=2) need explicit approval for the exchange
-        contract to transfer outcome tokens when placing sell orders.
+        update_balance_allowance is a GET request that asks the CLOB server
+        to re-read the on-chain token balance & allowance.  It does NOT set
+        the on-chain setApprovalForAll — that must already be done (e.g. via
+        the Polymarket frontend).
         
-        This is the #1 cause of sell failures — if allowance isn't set,
-        every sell attempt fails with 'not enough balance / allowance'.
-        We retry up to 2 times with a small delay.
+        After refresh we call get_balance_allowance to VERIFY the state.
+        Returns False if the token balance or allowance is zero.
         """
         import asyncio
-        MAX_RETRIES = 2
+        MAX_RETRIES = 3
         for attempt in range(MAX_RETRIES):
             try:
                 from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
@@ -1245,9 +1313,46 @@ class LiveTrader:
                     token_id=token_id,
                     signature_type=self._sig_type,
                 )
+                # Ask CLOB to refresh its cached on-chain state
                 self.clob_client.update_balance_allowance(params)
+                await asyncio.sleep(1.5)  # Give CLOB time to re-index on-chain state
+
+                # ── Verify: read back and check actual values ──
+                try:
+                    bal_resp = self.clob_client.get_balance_allowance(params)
+                    if bal_resp:
+                        balance_raw = float(bal_resp.get('balance', 0))
+                        allowance_raw = float(bal_resp.get('allowance', 0))
+                        # Polymarket uses 1e6 decimals
+                        balance = balance_raw / 1e6 if balance_raw > 1_000_000 else balance_raw
+                        allowance = allowance_raw / 1e6 if allowance_raw > 1_000_000 else allowance_raw
+
+                        print(f"🔍 Token check: balance={balance:.4f} "
+                              f"allowance={'MAX' if allowance > 1e12 else f'{allowance:.4f}'} "
+                              f"(attempt {attempt+1})", flush=True)
+
+                        if balance <= 0:
+                            print(f"⚠️ CLOB says token balance=0 — tokens may not be indexed yet", flush=True)
+                            if attempt < MAX_RETRIES - 1:
+                                wait = 2.0 * (attempt + 1)  # 2s, 4s
+                                print(f"   Waiting {wait:.0f}s for on-chain indexing...", flush=True)
+                                await asyncio.sleep(wait)
+                                continue
+                            return False
+
+                        if allowance <= 0:
+                            print(f"⚠️ CLOB says allowance=0 — CTF exchange may not be approved!", flush=True)
+                            print(f"   Fix: go to polymarket.com and sell ANY position manually (sets approval)", flush=True)
+                            if attempt < MAX_RETRIES - 1:
+                                await asyncio.sleep(2)
+                                continue
+                            return False
+                except Exception as check_err:
+                    print(f"⚠️ get_balance_allowance failed (non-fatal): {check_err}", flush=True)
+                    # Still return True — the update itself may have worked
+
                 if attempt > 0:
-                    print(f"✅ Conditional allowance set (attempt {attempt+1})", flush=True)
+                    print(f"✅ Conditional allowance verified (attempt {attempt+1})", flush=True)
                 return True
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
@@ -1298,13 +1403,14 @@ class LiveTrader:
             # Tick-align exit price
             sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
 
-            # Set conditional token allowance before selling (required for proxy wallets)
+            # ── Refresh & verify conditional token allowance ──
             allowance_ok = await self._ensure_conditional_allowance(pos['token_id'])
             if not allowance_ok:
-                # If allowance fails, try once more with a delay
-                import asyncio
-                await asyncio.sleep(0.5)
-                await self._ensure_conditional_allowance(pos['token_id'])
+                pos['_sell_fails'] = sell_fails + 1
+                remaining = MAX_SELL_RETRIES - pos['_sell_fails']
+                print(f"⛔ Skipping sell — allowance/balance check failed "
+                      f"({remaining} retries left)", flush=True)
+                return False
 
             # ═══ Attempt 1: FOK sell (instant exit) ═══
             print(f"📤 [FOK] SELL: {pos['coin']} {pos['direction']} | "
@@ -1318,9 +1424,18 @@ class LiveTrader:
                 self._finalize_close(trade_id, exit_price, pnl, reason)
                 return True
 
-            # ═══ Attempt 2: GTC sell at current price (queue) ═══
+            # ═══ Attempt 2: FOK with slightly fewer shares (rounding safety) ═══
+            reduced_shares = math.floor(sell_shares_fok * 0.95 * 100) / 100
+            if reduced_shares >= 0.01 and reduced_shares != sell_shares_fok:
+                print(f"⚠️ FOK full failed — retrying with {reduced_shares} shares (95%)", flush=True)
+                resp_reduced = await self._submit_order(pos['token_id'], sell_price, reduced_shares, SELL, OrderType.FOK)
+                if resp_reduced and resp_reduced.get('status') != 'error':
+                    print(f"✅ [FOK] SELL FILLED with reduced shares", flush=True)
+                    self._finalize_close(trade_id, exit_price, pnl, reason)
+                    return True
+
+            # ═══ Attempt 3: GTC sell at current price (queue) ═══
             if not can_gtc_sell:
-                # Position has < 5 shares — GTC requires min 5, would always fail
                 print(f"⚠️ FOK sell didn't fill, GTC skipped (shares={shares:.1f} < 5)", flush=True)
                 pos['_sell_fails'] = sell_fails + 1
                 return False
@@ -1328,7 +1443,6 @@ class LiveTrader:
             resp2 = await self._submit_order(pos['token_id'], sell_price, sell_shares_gtc, SELL, OrderType.GTC)
 
             if resp2 and resp2.get('status') != 'error':
-                # GTC sell is QUEUED, not instantly filled — track as pending sell
                 sell_order_id = resp2.get('orderID', resp2.get('id', ''))
                 pos['_pending_sell'] = {
                     'order_id': sell_order_id,
@@ -1339,13 +1453,12 @@ class LiveTrader:
                 print(f"📋 GTC SELL queued: {sell_order_id} — will confirm fill later", flush=True)
                 return True
 
-            # ═══ Attempt 3: GTC sell 1¢ lower ═══
+            # ═══ Attempt 4: GTC sell 1¢ lower ═══
             print(f"⚠️ GTC sell didn't fill — trying 1¢ lower", flush=True)
             retry_price = max(0.01, sell_price - 0.01)
             resp3 = await self._submit_order(pos['token_id'], retry_price, sell_shares_gtc, SELL, OrderType.GTC)
 
             if resp3 and resp3.get('status') != 'error':
-                # GTC sell is QUEUED — track as pending sell
                 sell_order_id = resp3.get('orderID', resp3.get('id', ''))
                 pos['_pending_sell'] = {
                     'order_id': sell_order_id,
@@ -1357,7 +1470,7 @@ class LiveTrader:
                 return True
 
             error_msg = resp3.get('errorMsg', 'Unknown') if resp3 else 'No response'
-            print(f"❌ All 3 sell attempts failed: {error_msg}", flush=True)
+            print(f"❌ All sell attempts failed: {error_msg}", flush=True)
             pos['_sell_fails'] = sell_fails + 1
 
         except Exception as e:
@@ -1385,16 +1498,19 @@ class LiveTrader:
 
             # ── Handle balance/allowance errors ──
             if 'not enough balance' in error_str or 'allowance' in error_str:
-                # Re-set allowance and try ONE more sell immediately
                 print(f"🔄 Balance/allowance error — refreshing allowance and retrying...", flush=True)
                 try:
                     import asyncio
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(2)
                     await self._ensure_conditional_allowance(pos['token_id'])
-                    await asyncio.sleep(0.5)
-                    # Try FOK sell with exact shares (no minimum)
+                    await asyncio.sleep(1)
+                    # Try FOK with reduced shares (balance rounding issue)
+                    reduced = math.floor(sell_shares_fok * 0.95 * 100) / 100
+                    if reduced < 0.01:
+                        reduced = sell_shares_fok
+                    print(f"🔄 Retrying FOK sell with {reduced} shares...", flush=True)
                     retry_resp = await self._submit_order(
-                        pos['token_id'], sell_price, sell_shares_fok, SELL, OrderType.FOK
+                        pos['token_id'], sell_price, reduced, SELL, OrderType.FOK
                     )
                     if retry_resp and retry_resp.get('status') != 'error':
                         print(f"✅ Retry sell succeeded after allowance refresh!", flush=True)
@@ -1417,11 +1533,41 @@ class LiveTrader:
 
     def _finalize_close(self, trade_id: str, exit_price: float,
                         pnl: float, reason: str):
-        """Finalize a closed position. Fee-aware PnL. Tracks consecutive wins/losses."""
+        """Finalize a closed position. Fee-aware PnL. Tracks consecutive wins/losses.
+        
+        Special case — sell_failed_settle: all sell attempts failed, marking
+        position as 'settled' so we stop retrying.  Tokens are NOT actually
+        sold and USDC hasn't been received, so we do NOT credit the balance.
+        The balance sync (every 60s) will pick up any real USDC once the
+        outcome tokens are auto-redeemed or manually redeemed on-chain.
+        """
         pos = self.positions.pop(trade_id, None)
         if not pos:
             return
 
+        # Always free the position slot
+        self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+
+        # ── sell_failed_settle: tokens unredeemed, don't inflate balance ──
+        if reason == 'sell_failed_settle':
+            pos['exit_price'] = exit_price
+            pos['pnl_gross'] = pnl
+            pos['pnl'] = 0        # Can't realize PnL without actually selling
+            pos['fees'] = 0
+            pos['pnl_pct'] = 0
+            pos['exit_time'] = datetime.now().isoformat()
+            pos['exit_reason'] = reason
+            pos['status'] = 'settled_unredeemed'
+            self.trade_history.append(pos)
+            # DON'T update balance — USDC is still locked in outcome tokens
+            print(f"⚠️ SETTLED (unsold): {pos['coin']} {pos['direction']} — "
+                  f"Entry:${pos['entry_price']:.3f} → Mkt:${exit_price:.3f} | "
+                  f"~{pos.get('shares',0):.1f} tokens unredeemed | "
+                  f"Bal stays ${self.balance_mgr.balance:.2f} (tokens need redemption)",
+                  flush=True)
+            return
+
+        # ── Normal close: position was actually sold ──
         # Subtract estimated taker fees from PnL (entry + exit)
         fee_rate = pos.get('fee_rate', self.TAKER_FEE_RATE)
         entry_fee = pos['entry_price'] * pos.get('shares', 0) * fee_rate
@@ -1439,7 +1585,6 @@ class LiveTrader:
         pos['status'] = 'closed'
 
         self.trade_history.append(pos)
-        self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
         self.balance_mgr.update_balance(self.balance_mgr.balance + pos['size_usd'] + net_pnl)
 
         # ── Track consecutive wins/losses for dynamic sizing ──
