@@ -208,23 +208,25 @@ class TradingEngine:
                 print(f"   Signals will fire but NO trades can execute.", flush=True)
                 print(f"   Options:", flush=True)
                 print(f"   1. Deposit USDC at https://polymarket.com", flush=True)
-                print(f"   2. Set POLY_BUILDER_* env vars for auto-redeem of resolved positions", flush=True)
+                print(f"   2. Wait for auto-redeem to claim resolved positions", flush=True)
                 print(f"   3. Manually claim resolved positions on polymarket.com", flush=True)
                 print(f"{'='*60}\n", flush=True)
 
-            # Initialize auto-redeemer for gasless position redemption
+            # Initialize auto-redeemer (direct on-chain or gasless relayer)
             try:
                 sig_type = getattr(self.live_trader, '_sig_type', 0)
                 self.auto_redeemer = AutoRedeemer(
                     self.live_trader.clob_client,
                     sig_type=sig_type
                 )
-                if self.auto_redeemer.init_relayer():
-                    print("💰 Auto-redeemer initialized — will redeem resolved positions", flush=True)
+                if self.auto_redeemer.init():
+                    status = self.auto_redeemer.get_status()
+                    print(f"💰 Auto-redeemer ready ({status['method']}) — "
+                          f"will auto-redeem resolved positions", flush=True)
                     # Do an immediate redeem check on startup (balance might be $0)
                     asyncio.create_task(self._initial_redeem_check())
                 else:
-                    print("⚠️ Auto-redeem disabled (no POLY_BUILDER_* credentials)", flush=True)
+                    print("⚠️ Auto-redeem disabled — check logs above", flush=True)
                     self.auto_redeemer = None
             except Exception as e:
                 print(f"⚠️ Auto-redeem init failed: {e}", flush=True)

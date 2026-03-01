@@ -35,13 +35,15 @@ class Config:
 
     # ═══════════════════════════════════════════════════════════════════
     # BUILDER RELAYER (gasless auto-redeem of resolved positions)
-    # Get credentials from: https://polymarket.com (builder account)
-    # Without these, auto-redeem is disabled and you must redeem manually.
+    # AUTO-REDEEM: Redeems resolved positions → USDC automatically.
+    # Default: direct on-chain via Gnosis Safe (~0.004 POL gas per redeem).
+    # Optional: gasless via builder relayer (set POLY_BUILDER_* for zero-gas).
     # ═══════════════════════════════════════════════════════════════════
     POLY_BUILDER_API_KEY = os.getenv('POLY_BUILDER_API_KEY', '')
     POLY_BUILDER_SECRET = os.getenv('POLY_BUILDER_SECRET', '')
     POLY_BUILDER_PASSPHRASE = os.getenv('POLY_BUILDER_PASSPHRASE', '')
-    AUTO_REDEEM_INTERVAL = int(os.getenv('AUTO_REDEEM_INTERVAL', '60'))  # Check every N seconds
+    AUTO_REDEEM_INTERVAL = int(os.getenv('AUTO_REDEEM_INTERVAL', '120'))  # Check every N seconds
+    POLYGON_RPC_URL = os.getenv('POLYGON_RPC_URL', '')  # Custom RPC (optional, has fallbacks)
 
     # ═══════════════════════════════════════════════════════════════════
     # API ENDPOINTS
