@@ -160,9 +160,11 @@ class AutoRedeemer:
                     w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
                     if w3.is_connected():
                         self._w3 = w3
+                        # Mask API keys in log output
+                        display_url = rpc_url.split('/v2/')[0] + '/v2/***' if '/v2/' in rpc_url else rpc_url[:40]
                         print(f"✅ Auto-redeem: direct on-chain "
                               f"({'Safe' if self.sig_type == 2 else 'EOA'}) "
-                              f"via {rpc_url[:50]}", flush=True)
+                              f"via {display_url}", flush=True)
                         return True
                 except Exception:
                     continue
