@@ -157,6 +157,19 @@ class TradingEngine:
         except Exception as e:
             print(f"⚠️ Startup redeem check failed: {e}", flush=True)
 
+    async def _startup_approval_and_redeem(self):
+        """Ensure CTF exchange approvals, then run initial redeem check."""
+        try:
+            await asyncio.sleep(3)
+            if self.auto_redeemer:
+                print("🔑 Checking CTF exchange approvals...", flush=True)
+                await self.auto_redeemer.ensure_ctf_approval()
+        except Exception as e:
+            print(f"⚠️ Startup approval check failed: {e}", flush=True)
+
+        # Then do the original redeem check
+        await self._initial_redeem_check()
+
     async def init(self):
         """Initialize all components."""
         Config.print_status()
@@ -223,8 +236,8 @@ class TradingEngine:
                     status = self.auto_redeemer.get_status()
                     print(f"💰 Auto-redeemer ready ({status['method']}) — "
                           f"will auto-redeem resolved positions", flush=True)
-                    # Do an immediate redeem check on startup (balance might be $0)
-                    asyncio.create_task(self._initial_redeem_check())
+                    # Ensure CTF exchange approvals (required for selling)
+                    asyncio.create_task(self._startup_approval_and_redeem())
                 else:
                     print("⚠️ Auto-redeem disabled — check logs above", flush=True)
                     self.auto_redeemer = None

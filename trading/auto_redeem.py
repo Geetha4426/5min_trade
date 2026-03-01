@@ -418,18 +418,15 @@ class AutoRedeemer:
             print(f"  ❌ Relayer redeem error: {e}", flush=True)
             return False
 
-    # ─── Method 2: Direct on-chain via Gnosis Safe execTransaction ───
+    # ─── Generic Safe transaction execution ─────────────────────────
 
-    async def _redeem_via_safe(self, condition_id: str, neg_risk: bool) -> bool:
-        """Redeem by calling execTransaction on the Gnosis Safe directly.
+    async def _execute_via_safe(self, target: str, inner_data: bytes,
+                                gas_limit: int = 300_000,
+                                label: str = "Safe tx") -> bool:
+        """Execute an arbitrary call through the Gnosis Safe.
 
-        This is exactly what the Polymarket frontend does when you click "Claim":
-        1. Build CTF.redeemPositions calldata
-        2. Compute the Safe transaction hash (EIP-712)
-        3. Sign with the owner's private key
-        4. Call Safe.execTransaction() on-chain
-
-        Costs ~0.004 POL gas (~$0.0004).
+        Signs an EIP-712 Safe transaction and submits on-chain.
+        Costs ~0.004 POL gas.  Used for redeem, setApprovalForAll, etc.
         """
         if not self._w3:
             return False
@@ -440,29 +437,24 @@ class AutoRedeemer:
 
             w3 = self._w3
             safe_addr = Web3.to_checksum_address(self._proxy_wallet)
-            inner_data, target_str = self._build_redeem_calldata(condition_id, neg_risk)
-            target = Web3.to_checksum_address(target_str)
+            target = Web3.to_checksum_address(target)
 
             # ── Get Safe nonce ──
             nonce = await self._get_safe_nonce(safe_addr)
             if nonce is None:
-                print("  ❌ Could not read Safe nonce", flush=True)
+                print(f"  ❌ Could not read Safe nonce", flush=True)
                 return False
 
             # ── Compute EIP-712 Safe transaction hash ──
             zero_addr = "0x" + "00" * 20
             safe_tx_hash = self._compute_safe_tx_hash(
-                safe_addr, target, 0, inner_data, 0,   # operation=CALL
-                0, 0, 0,            # safeTxGas, baseGas, gasPrice
-                zero_addr,          # gasToken
-                zero_addr,          # refundReceiver
-                nonce,
+                safe_addr, target, 0, inner_data, 0,
+                0, 0, 0, zero_addr, zero_addr, nonce,
             )
 
-            # ── ECDSA sign the hash ──
+            # ── ECDSA sign ──
             acct = Account.from_key(self._private_key)
-            signed = acct.signHash(safe_tx_hash)
-            # Pack: r (32) + s (32) + v (1)
+            signed = acct.unsafe_sign_hash(safe_tx_hash)
             sig_bytes = (signed.r.to_bytes(32, 'big') +
                          signed.s.to_bytes(32, 'big') +
                          bytes([signed.v]))
@@ -486,32 +478,26 @@ class AutoRedeemer:
             }]
 
             safe = w3.eth.contract(address=safe_addr, abi=exec_abi)
-
-            # Estimate gas price
             gas_price = w3.eth.gas_price
             max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
             priority_fee = min(w3.to_wei(30, 'gwei'), max_fee - 1)
 
             tx_data = safe.functions.execTransaction(
-                target, 0, inner_data, 0,  # to, value, data, operation
-                0, 0, 0,                    # safeTxGas, baseGas, gasPrice
-                zero_addr, zero_addr,       # gasToken, refundReceiver
-                sig_bytes,
+                target, 0, inner_data, 0,
+                0, 0, 0, zero_addr, zero_addr, sig_bytes,
             ).build_transaction({
                 'from': acct.address,
                 'nonce': w3.eth.get_transaction_count(acct.address),
-                'gas': 300_000,
+                'gas': gas_limit,
                 'maxFeePerGas': max_fee,
                 'maxPriorityFeePerGas': priority_fee,
                 'chainId': 137,
             })
 
-            # ── Sign and send ──
             signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
             tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            print(f"  📨 Safe tx sent: {tx_hash.hex()}", flush=True)
+            print(f"  📨 {label}: {tx_hash.hex()}", flush=True)
 
-            # ── Wait for receipt ──
             loop = asyncio.get_event_loop()
             receipt = await loop.run_in_executor(
                 None,
@@ -519,17 +505,26 @@ class AutoRedeemer:
             )
 
             if receipt['status'] == 1:
-                print(f"  ✅ Confirmed! Gas: {receipt['gasUsed']} "
-                      f"(block {receipt['blockNumber']})", flush=True)
+                print(f"  ✅ {label} confirmed (gas: {receipt['gasUsed']}, "
+                      f"block {receipt['blockNumber']})", flush=True)
                 return True
             else:
-                print(f"  ❌ Tx reverted (block {receipt['blockNumber']})", flush=True)
+                print(f"  ❌ {label} reverted (block {receipt['blockNumber']})", flush=True)
                 return False
 
         except Exception as e:
-            print(f"  ❌ Safe redeem error: {e}", flush=True)
+            print(f"  ❌ {label} error: {e}", flush=True)
             traceback.print_exc()
             return False
+
+    # ─── Method 2: Direct on-chain via Gnosis Safe execTransaction ───
+
+    async def _redeem_via_safe(self, condition_id: str, neg_risk: bool) -> bool:
+        """Redeem via Safe.execTransaction → CTF.redeemPositions."""
+        inner_data, target_str = self._build_redeem_calldata(condition_id, neg_risk)
+        return await self._execute_via_safe(
+            target_str, inner_data, gas_limit=300_000, label="Redeem"
+        )
 
     async def _get_safe_nonce(self, safe_addr: str) -> Optional[int]:
         """Read the current nonce from the Gnosis Safe contract."""
@@ -633,6 +628,124 @@ class AutoRedeemer:
 
         except Exception as e:
             print(f"  ❌ EOA redeem error: {e}", flush=True)
+            return False
+
+    # ─── CTF Exchange Approval ─────────────────────────────────────────
+
+    async def ensure_ctf_approval(self) -> bool:
+        """Check and fix CTF exchange approval for selling.
+
+        Sell orders require the CTF contract to have `setApprovalForAll`
+        for both the Normal and NegRisk exchanges.  If not approved, this
+        method sends the approval transactions on-chain via the Safe.
+
+        Returns True if all approvals are OK (already set or newly set).
+        """
+        if not self._w3 or self._method not in ("direct", "direct_eoa"):
+            return False
+
+        from web3 import Web3
+        from eth_abi import encode
+
+        CTF = Web3.to_checksum_address(CTF_ADDRESS)
+        owner = Web3.to_checksum_address(self._proxy_wallet)
+
+        EXCHANGES = {
+            'Normal':  '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E',
+            'NegRisk': '0xC5d563A36AE78145C45a50134d48A1215220f80a',
+        }
+
+        # isApprovedForAll(address,address) selector = 0xe985e9c5
+        all_ok = True
+        for label, exchange in EXCHANGES.items():
+            try:
+                owner_pad = owner.lower().replace('0x', '').zfill(64)
+                op_pad = exchange.lower().replace('0x', '').zfill(64)
+                result = self._w3.eth.call({
+                    'to': CTF,
+                    'data': f'0xe985e9c5{owner_pad}{op_pad}',
+                })
+                approved = int.from_bytes(result, 'big') == 1
+
+                if approved:
+                    print(f"✅ CTF approval ({label}): approved", flush=True)
+                    continue
+
+                # Not approved — send setApprovalForAll(operator, true)
+                print(f"⚠️ CTF approval ({label}): NOT approved — fixing on-chain...",
+                      flush=True)
+
+                # setApprovalForAll(address,bool) selector = 0xa22cb465
+                selector = bytes.fromhex('a22cb465')
+                calldata = selector + encode(
+                    ['address', 'bool'],
+                    [Web3.to_checksum_address(exchange), True]
+                )
+
+                if self._method == "direct":
+                    ok = await self._execute_via_safe(
+                        CTF_ADDRESS, calldata, gas_limit=120_000,
+                        label=f"Approve {label}"
+                    )
+                else:
+                    ok = await self._execute_eoa_call(
+                        CTF_ADDRESS, calldata, gas_limit=120_000,
+                        label=f"Approve {label}"
+                    )
+
+                if ok:
+                    print(f"✅ CTF approval ({label}): now approved!", flush=True)
+                else:
+                    print(f"❌ CTF approval ({label}): tx failed!", flush=True)
+                    all_ok = False
+
+            except Exception as e:
+                print(f"⚠️ CTF approval check ({label}): {e}", flush=True)
+                all_ok = False
+
+        return all_ok
+
+    async def _execute_eoa_call(self, target: str, calldata: bytes,
+                                gas_limit: int = 200_000,
+                                label: str = "EOA tx") -> bool:
+        """Execute a direct EOA call (no Safe wrapper)."""
+        if not self._w3:
+            return False
+        try:
+            from web3 import Web3
+            from eth_account import Account
+            w3 = self._w3
+            acct = Account.from_key(self._private_key)
+            gas_price = w3.eth.gas_price
+            max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
+            priority_fee = min(w3.to_wei(30, 'gwei'), max_fee - 1)
+            tx = {
+                'from': acct.address,
+                'to': Web3.to_checksum_address(target),
+                'data': '0x' + calldata.hex(),
+                'nonce': w3.eth.get_transaction_count(acct.address),
+                'gas': gas_limit,
+                'maxFeePerGas': max_fee,
+                'maxPriorityFeePerGas': priority_fee,
+                'chainId': 137,
+                'value': 0,
+            }
+            signed_tx = w3.eth.account.sign_transaction(tx, self._private_key)
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            print(f"  📨 {label}: {tx_hash.hex()}", flush=True)
+            loop = asyncio.get_event_loop()
+            receipt = await loop.run_in_executor(
+                None,
+                lambda: w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+            )
+            if receipt['status'] == 1:
+                print(f"  ✅ {label} confirmed (gas: {receipt['gasUsed']})", flush=True)
+                return True
+            else:
+                print(f"  ❌ {label} reverted", flush=True)
+                return False
+        except Exception as e:
+            print(f"  ❌ {label} error: {e}", flush=True)
             return False
 
     # ─── Public helpers ───────────────────────────────────────────────

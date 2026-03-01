@@ -495,9 +495,10 @@ class LiveTrader:
         """
         try:
             from config import Config
-            rpcs = getattr(Config, 'POLYGON_RPC_URLS', None)
+            rpc_url = getattr(Config, 'POLYGON_RPC_URL', '')
+            rpcs = getattr(Config, 'POLYGON_RPC_URLS', rpc_url)
             if not rpcs:
-                return
+                rpcs = 'https://polygon-bor-rpc.publicnode.com'
             rpc_list = [r.strip() for r in rpcs.split(',') if r.strip()] if isinstance(rpcs, str) else rpcs
             if not rpc_list:
                 return
