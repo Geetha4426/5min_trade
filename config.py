@@ -34,6 +34,16 @@ class Config:
     POLY_CHAIN_ID = int(os.getenv('POLY_CHAIN_ID', '137'))  # Polygon mainnet
 
     # ═══════════════════════════════════════════════════════════════════
+    # BUILDER RELAYER (gasless auto-redeem of resolved positions)
+    # Get credentials from: https://polymarket.com (builder account)
+    # Without these, auto-redeem is disabled and you must redeem manually.
+    # ═══════════════════════════════════════════════════════════════════
+    POLY_BUILDER_API_KEY = os.getenv('POLY_BUILDER_API_KEY', '')
+    POLY_BUILDER_SECRET = os.getenv('POLY_BUILDER_SECRET', '')
+    POLY_BUILDER_PASSPHRASE = os.getenv('POLY_BUILDER_PASSPHRASE', '')
+    AUTO_REDEEM_INTERVAL = int(os.getenv('AUTO_REDEEM_INTERVAL', '60'))  # Check every N seconds
+
+    # ═══════════════════════════════════════════════════════════════════
     # API ENDPOINTS
     # ═══════════════════════════════════════════════════════════════════
     GAMMA_API_URL = 'https://gamma-api.polymarket.com'
@@ -259,5 +269,7 @@ class Config:
             print(f"  API Creds: {'🔑 auto-derive from key' if api_auto else '✅ manually set'}", flush=True)
             print(f"  Sig Type: {cls.POLY_SIGNATURE_TYPE} ({'EOA/MetaMask' if cls.POLY_SIGNATURE_TYPE == 0 else 'Email/Magic' if cls.POLY_SIGNATURE_TYPE == 1 else 'Proxy'})", flush=True)
         print(f"🔀 CLOB Relay: {'✅ ' + cls.CLOB_RELAY_URL if cls.is_relay_enabled() else '❌ Direct (may be geo-blocked)'}", flush=True)
+        redeem_ok = bool(cls.POLY_BUILDER_API_KEY and cls.POLY_BUILDER_SECRET and cls.POLY_BUILDER_PASSPHRASE)
+        print(f"💰 Auto-Redeem: {'✅ enabled' if redeem_ok else '❌ disabled (set POLY_BUILDER_* env vars)'}", flush=True)
         print(f"Balance: ${cls.STARTING_BALANCE:.2f}", flush=True)
         print(f"{'='*60}\n", flush=True)

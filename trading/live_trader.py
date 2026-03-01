@@ -685,22 +685,50 @@ class LiveTrader:
 
             if use_fok:
                 # ═══ FOK MODE: No 5-share minimum! $1 trades possible ═══
-                # FOK buy: specify dollar amount, API auto-calculates shares
-                shares = math.floor(size / price * 100) / 100  # floor to 2dp (matches CLOB library)
+                shares = math.floor(size / price * 100) / 100  # floor to 2dp
                 if shares < 1:
                     shares = 1  # Minimum 1 share
-                order_amount = round(price * shares, 2)  # max 2 decimals (maker)
+
+                # GCD-align shares so price×shares has ≤ 2 decimal places
+                # (MUST match _submit_order's adjustment to keep position accounting correct)
+                P = int(round(price * 100))
+                S = int(math.floor(shares * 100))
+                if P > 0 and S > 0:
+                    step = 100 // math.gcd(P, 100)
+                    S = (S // step) * step
+                    # If GCD alignment dropped amount below $1 minimum, round UP
+                    if P * S < 10000 and step > 0:  # price×shares < $1
+                        S = ((S // step) + 1) * step
+                    shares = S / 100.0
+
+                order_amount = round(price * shares, 2)
                 if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
-                    shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
+                    # Still below $1 — compute minimum valid shares
+                    min_S = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price * 100)
+                    if P > 0:
+                        gcd_step = 100 // math.gcd(P, 100)
+                        min_S = ((min_S + gcd_step - 1) // gcd_step) * gcd_step
+                    shares = min_S / 100.0
                     order_amount = round(price * shares, 2)
                 order_type = OrderType.FOK
                 order_type_tag = 'FOK'
             else:
                 # ═══ GTC MODE: 5-share minimum, queue in orderbook ═══
                 MIN_SHARES = 5  # Polymarket CLOB minimum for GTC
-                raw_shares = math.floor(size / price * 100) / 100  # floor to 2dp (matches CLOB library)
+                raw_shares = math.floor(size / price * 100) / 100  # floor to 2dp
                 shares = max(MIN_SHARES, raw_shares)
-                order_amount = round(price * shares, 2)  # max 2 decimals (maker)
+
+                # GCD-align shares (same logic as _submit_order)
+                P = int(round(price * 100))
+                S = int(math.floor(shares * 100))
+                if P > 0 and S > 0:
+                    step = 100 // math.gcd(P, 100)
+                    S = (S // step) * step
+                    if S < MIN_SHARES * 100:
+                        S = ((MIN_SHARES * 100 + step - 1) // step) * step
+                    shares = S / 100.0
+
+                order_amount = round(price * shares, 2)
                 if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
                     shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
                     shares = max(MIN_SHARES, shares)
@@ -1171,10 +1199,12 @@ class LiveTrader:
             return True
 
         # ── Share sizing ──
-        # FOK sell: use actual share count (can be < 5)
-        # GTC sell: enforce 5-share minimum
-        sell_shares_fok = math.ceil(shares) if shares > 0 else shares
-        sell_shares_gtc = max(5, sell_shares_fok)
+        # FOK sell: use EXACT share count from position (never ceil — we can't
+        # sell more shares than we own; ceil caused 'not enough balance' errors)
+        # GTC sell: enforce 5-share minimum, but SKIP if we have fewer than 5
+        sell_shares_fok = math.floor(shares * 100) / 100 if shares > 0 else shares
+        can_gtc_sell = shares >= 5  # GTC requires min 5 shares — don't even try if < 5
+        sell_shares_gtc = max(5, math.ceil(shares)) if can_gtc_sell else sell_shares_fok
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -1204,6 +1234,11 @@ class LiveTrader:
                 return True
 
             # ═══ Attempt 2: GTC sell at current price (queue) ═══
+            if not can_gtc_sell:
+                # Position has < 5 shares — GTC requires min 5, would always fail
+                print(f"⚠️ FOK sell didn't fill, GTC skipped (shares={shares:.1f} < 5)", flush=True)
+                pos['_sell_fails'] = sell_fails + 1
+                return False
             print(f"⚠️ FOK sell didn't fill — trying GTC", flush=True)
             resp2 = await self._submit_order(pos['token_id'], sell_price, sell_shares_gtc, SELL, OrderType.GTC)
 

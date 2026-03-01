@@ -42,6 +42,7 @@ from trading.paper_trader import PaperTrader
 from trading.risk_manager import RiskManager
 from trading.live_trader import LiveTrader
 from trading.live_balance_manager import LiveBalanceManager
+from trading.auto_redeem import AutoRedeemer
 from bot.main import TelegramBot
 
 
@@ -91,6 +92,9 @@ class TradingEngine:
         # Telegram bot
         self.bot = TelegramBot(engine=self)
 
+        # Auto-redeem resolved positions (gasless via builder relayer)
+        self.auto_redeemer = None  # Initialized in init() after live_trader
+
         # State
         self.is_running = False
         self._scan_task = None
@@ -122,6 +126,29 @@ class TradingEngine:
             m = self.live_balance_mgr.mode
             return True, f'{m.emoji} {m.name}: {m.description}'
         return False, f'Unknown risk mode: {risk_mode}. Use: seed, concentration, medium, aggressive'
+
+    async def _initial_redeem_check(self):
+        """Run a one-time redeem check on startup to unlock stuck funds."""
+        try:
+            await asyncio.sleep(5)  # Let everything settle
+            if self.auto_redeemer:
+                result = await self.auto_redeemer.force_check()
+                if result.get('redeemed', 0) > 0:
+                    amount = result.get('total_redeemed_usd', 0)
+                    print(f"💰 Startup redeem: {result['redeemed']} positions → ${amount:.2f} USDC", flush=True)
+                    await self.bot.send_message(
+                        f"💰 Auto-redeemed {result['redeemed']} resolved positions!\n"
+                        f"Recovered: ~${amount:.2f} USDC"
+                    )
+                    # Re-sync balance
+                    real_bal = await self.live_trader.fetch_balance()
+                    if real_bal is not None:
+                        self.live_balance_mgr.update_balance(real_bal)
+                        print(f"💰 Balance re-synced: ${real_bal:.2f}", flush=True)
+                else:
+                    print("💰 No resolved positions to redeem at startup", flush=True)
+        except Exception as e:
+            print(f"⚠️ Startup redeem check failed: {e}", flush=True)
 
     async def init(self):
         """Initialize all components."""
@@ -161,6 +188,24 @@ class TradingEngine:
                 print(f"💰 Balance synced: ${real_bal:.2f} (real)", flush=True)
             else:
                 print(f"⚠️ Using configured balance: ${self.live_balance_mgr.balance:.2f}", flush=True)
+
+            # Initialize auto-redeemer for gasless position redemption
+            try:
+                sig_type = getattr(self.live_trader, '_sig_type', 0)
+                self.auto_redeemer = AutoRedeemer(
+                    self.live_trader.clob_client,
+                    sig_type=sig_type
+                )
+                if self.auto_redeemer.init_relayer():
+                    print("💰 Auto-redeemer initialized — will redeem resolved positions", flush=True)
+                    # Do an immediate redeem check on startup (balance might be $0)
+                    asyncio.create_task(self._initial_redeem_check())
+                else:
+                    print("⚠️ Auto-redeem disabled (no POLY_BUILDER_* credentials)", flush=True)
+                    self.auto_redeemer = None
+            except Exception as e:
+                print(f"⚠️ Auto-redeem init failed: {e}", flush=True)
+                self.auto_redeemer = None
         else:
             print("📋 Paper trading only (no live credentials)", flush=True)
             self.trading_mode = 'paper'
@@ -357,6 +402,25 @@ class TradingEngine:
                     strat_name = trade.get('strategy', '')
                     if strat_name and hasattr(self.dynamic_picker, 'tracker'):
                         self.dynamic_picker.tracker.record(strat_name, pnl > 0, pnl)
+
+                # ── Auto-redeem resolved positions ──
+                if self.auto_redeemer and self.trading_mode == 'live':
+                    try:
+                        redeem_result = await self.auto_redeemer.check_and_redeem()
+                        if redeem_result and redeem_result.get('redeemed', 0) > 0:
+                            amt = redeem_result.get('total_redeemed_usd', 0)
+                            print(f"💰 Auto-redeemed {redeem_result['redeemed']} positions → ${amt:.2f} USDC", flush=True)
+                            await self.bot.send_message(
+                                f"💰 Auto-redeemed {redeem_result['redeemed']} resolved positions!\n"
+                                f"Recovered: ~${amt:.2f} USDC"
+                            )
+                            # Re-sync balance after redeem
+                            real_bal = await self.live_trader.fetch_balance()
+                            if real_bal is not None:
+                                self.live_balance_mgr.update_balance(real_bal)
+                    except Exception as e:
+                        if scan_count % 100 == 1:
+                            print(f"⚠️ Auto-redeem error: {e}", flush=True)
 
                 # Scan interval from config
                 min_tf = min(self.active_timeframes) if self.active_timeframes else 15

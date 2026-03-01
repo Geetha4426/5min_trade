@@ -45,13 +45,13 @@ LIVE_MODES = {
     'seed': LiveRiskMode(
         name='SEED',
         emoji='🌱',
-        max_bet_pct=100.0,      # Can bet 100% — only high-confidence trades
-        reserve_pct=0.0,        # Zero reserve — every cent counts at $1
-        reserve_min=0.0,        # No minimum reserve
+        max_bet_pct=50.0,       # Max 50% per trade — protect the stack
+        reserve_pct=15.0,       # Keep 15% as buffer for sell fees/emergencies
+        reserve_min=0.50,       # Always keep $0.50 minimum reserve
         max_pos_per_dollar=1.0, # 1 position per $1
-        max_positions_cap=2,    # 2 positions (can do 1 arb = 2 legs)
-        min_confidence=0.88,    # High bar — only near-guaranteed trades fire
-        description='$1-5 start — ALL strategies, 0.88 confidence floor',
+        max_positions_cap=1,    # ONE position at a time — never spread $4 thin
+        min_confidence=0.90,    # Very high bar — only near-certain trades fire
+        description='$1-5 start — 1 position, 0.90 confidence, safe growth',
     ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
@@ -95,6 +95,9 @@ GRADUATION_THRESHOLDS = {
     'concentration': ('medium', 20.0),    # $20 → graduate to medium
     'medium': ('aggressive', 100.0),      # $100 → graduate to aggressive
 }
+
+# Exported constant for bot/main.py seed progress display
+SEED_GRADUATE_BALANCE = GRADUATION_THRESHOLDS['seed'][1]  # $5
 
 
 class LiveBalanceManager:
