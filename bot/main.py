@@ -63,6 +63,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("drawdown", self.cmd_drawdown))
         self.app.add_handler(CommandHandler("stratstats", self.cmd_stratstats))
         self.app.add_handler(CommandHandler("cheaphunter", self.cmd_cheaphunter))
+        self.app.add_handler(CommandHandler("redeem", self.cmd_redeem))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -89,6 +90,7 @@ class TelegramBot:
                 BotCommand("estop", "Emergency stop"),
                 BotCommand("seed", "$1 start — arb-only seed mode"),
                 BotCommand("cheaphunter", "🎰 Lottery ticket mode — $1 bets across all TFs"),
+                BotCommand("redeem", "Claim resolved positions on-chain"),
                 BotCommand("history", "Trade history"),
                 BotCommand("settings", "Bot settings"),
             ])
@@ -261,6 +263,54 @@ class TelegramBot:
         mode = self.engine.trading_mode.upper()
         text += f"\nActive: {mode}"
         await update.message.reply_text(text)
+
+    async def cmd_redeem(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Force-check and redeem all resolved positions."""
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not initialized")
+            return
+
+        if not self.engine.auto_redeemer:
+            await update.message.reply_text(
+                "⚠️ Auto-redeemer not available.\n"
+                "Check that POLYMARKET_PRIVATE_KEY and proxy wallet are set."
+            )
+            return
+
+        await update.message.reply_text("🔍 Checking for resolved positions...")
+
+        try:
+            result = await self.engine.auto_redeemer.force_check()
+            redeemed = result.get('redeemed', 0)
+            failed = result.get('failed', 0)
+            skipped = result.get('skipped', 0)
+            total_usd = result.get('total_redeemed_usd', 0)
+
+            if redeemed > 0:
+                text = (
+                    f"💰 Redeemed {redeemed} position(s)!\n"
+                    f"Recovered: ~${total_usd:.2f} USDC\n"
+                )
+                if failed > 0:
+                    text += f"⚠️ {failed} failed (will retry next cycle)\n"
+
+                # Re-sync balance
+                real_bal = await self.engine.live_trader.fetch_balance()
+                if real_bal is not None:
+                    self.engine.live_balance_mgr.update_balance(real_bal)
+                    text += f"\n💰 Balance: ${real_bal:.2f}"
+            elif failed > 0:
+                text = (
+                    f"⚠️ {failed} position(s) failed to redeem.\n"
+                    f"Will retry automatically next cycle."
+                )
+            else:
+                text = "✅ No resolved positions to redeem right now."
+
+            await update.message.reply_text(text)
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Redeem error: {e}")
 
     async def cmd_strategy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show strategy selection."""
