@@ -518,8 +518,25 @@ class LiveTrader:
             return None
 
         # Check if trading is paused due to repeated failures
+        # Auto-unpause after 5 minutes to retry (network/allowance issues are transient)
         if self._trading_paused:
-            return None
+            if not hasattr(self, '_paused_at'):
+                self._paused_at = time.time()
+            elapsed = time.time() - self._paused_at
+            if elapsed >= 300:  # 5 minutes
+                print(f"🔄 Auto-resuming trading after {elapsed/60:.0f}min pause", flush=True)
+                self._trading_paused = False
+                self._consecutive_failures = 0
+                self._pause_reason = ''
+            else:
+                # Log periodically so user knows WHY bot isn't trading
+                now = time.time()
+                if not hasattr(self, '_last_pause_log') or now - self._last_pause_log > 60:
+                    self._last_pause_log = now
+                    remaining = 300 - elapsed
+                    print(f"⏸️ Trading paused ({self._pause_reason}). "
+                          f"Auto-resume in {remaining:.0f}s", flush=True)
+                return None
 
         can_trade, reason = self.balance_mgr.can_trade()
         if not can_trade:
@@ -533,6 +550,8 @@ class LiveTrader:
 
         size = self.balance_mgr.get_position_size(signal.confidence)
         if size < Config.POLYMARKET_MIN_ORDER_SIZE:
+            print(f"⚠️ Skip: position size ${size:.2f} < minimum ${Config.POLYMARKET_MIN_ORDER_SIZE:.2f} | "
+                  f"Signal: {signal.coin} {signal.direction}", flush=True)
             return None
 
         # For BOTH-side strategies (arb, straddle), execute both legs
@@ -764,7 +783,15 @@ class LiveTrader:
                 print(f"❌ Order rejected: {error_msg}", flush=True)
 
                 # FOK rejection is normal (no liquidity) — try GTC fallback
+                # BUT: GTC has 5-share minimum, which may exceed our balance
                 if use_fok and error_msg and 'not fill' in error_msg.lower():
+                    # Pre-check: can we afford 5 shares at this price for GTC?
+                    gtc_cost = round(price * 5, 2)
+                    real_bal = await self._get_cached_balance()
+                    if real_bal is not None and gtc_cost > real_bal:
+                        print(f"⚠️ FOK didn't fill. GTC needs ${gtc_cost:.2f} (5×${price:.2f}) "
+                              f"but only ${real_bal:.2f} available — skipping", flush=True)
+                        return None
                     print(f"🔄 FOK didn't fill — falling back to GTC", flush=True)
                     return await self._place_buy(signal, size, use_fok=False)
                 return None
@@ -827,6 +854,13 @@ class LiveTrader:
 
             # ── FOK didn't fill: try GTC fallback ──
             if use_fok and ('not fill' in error_str or 'no fill' in error_str):
+                # Pre-check: can we afford 5 shares at this price for GTC?
+                tick_price = max(0.01, min(0.99, round(signal.entry_price * 100) / 100))
+                gtc_cost = round(tick_price * 5, 2)
+                real_bal_check = await self._get_cached_balance()
+                if real_bal_check is not None and gtc_cost > real_bal_check:
+                    print(f"⚠️ FOK exception, GTC needs ${gtc_cost:.2f} but only ${real_bal_check:.2f} — skip", flush=True)
+                    return None
                 print(f"🔄 FOK didn't fill — falling back to GTC", flush=True)
                 return await self._place_buy(signal, size, use_fok=False)
 
@@ -883,11 +917,12 @@ class LiveTrader:
                 self._last_balance_check = 0  # Force refresh next time
                 if self._consecutive_failures >= 5:
                     self._trading_paused = True
+                    self._paused_at = time.time()
                     self._pause_reason = 'Not enough balance/allowance'
                     print(f"\n{'='*60}", flush=True)
                     print(f"🛑 TRADING PAUSED: {self._consecutive_failures} consecutive balance errors", flush=True)
-                    print(f"  Deposit USDC at https://polymarket.com", flush=True)
-                    print(f"  Then restart the bot.", flush=True)
+                    print(f"  Will auto-resume in 5 minutes to retry.", flush=True)
+                    print(f"  If persistent, deposit USDC at https://polymarket.com", flush=True)
                     print(f"{'='*60}\n", flush=True)
 
             return None

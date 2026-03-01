@@ -408,7 +408,11 @@ class TradingEngine:
                         print(f"🎯 [{mode_tag}] Signal: {signal.strategy} -> {market.get('coin','?')} "
                               f"{signal.direction} @ {signal.entry_price:.4f} "
                               f"(conf={signal.confidence:.0%})", flush=True)
-                        trade = await self.active_trader.execute_signal(signal)
+                        try:
+                            trade = await self.active_trader.execute_signal(signal)
+                        except Exception as exec_err:
+                            print(f"❌ Execute error ({signal.coin} {signal.direction}): {exec_err}", flush=True)
+                            trade = None
                         if trade:
                             await self.bot.send_trade_alert(trade)
                             print(f"✅ Trade executed: {trade.get('coin','?')} {trade.get('direction','?')}", flush=True)
