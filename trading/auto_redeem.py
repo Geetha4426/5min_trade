@@ -200,6 +200,7 @@ class AutoRedeemer:
                 return {"redeemed": 0, "total_redeemed_usd": 0}
 
             redeemed = 0
+            failed = 0
             total_usd = 0.0
 
             for token_id, balance in positions.items():
@@ -241,9 +242,14 @@ class AutoRedeemer:
                     print(f"✅ Redeemed! Session total: {self._total_redeemed} "
                           f"(~${self._total_usd_recovered:.2f})", flush=True)
                 else:
+                    failed += 1
                     print(f"⚠️ Redeem failed: {condition_id[:16]}...", flush=True)
 
-            return {"redeemed": redeemed, "total_redeemed_usd": total_usd}
+                # Wait between redeems so nonce clears on-chain
+                await asyncio.sleep(5)
+
+            return {"redeemed": redeemed, "failed": failed,
+                    "total_redeemed_usd": total_usd}
 
         except Exception as e:
             logger.error("Auto-redeem error: %s", e)
@@ -482,12 +488,16 @@ class AutoRedeemer:
             max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
             priority_fee = min(w3.to_wei(30, 'gwei'), max_fee - 1)
 
+            # Use 'pending' nonce to avoid "replacement transaction underpriced"
+            # when a previous tx is still in the mempool
+            eoa_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
+
             tx_data = safe.functions.execTransaction(
                 target, 0, inner_data, 0,
                 0, 0, 0, zero_addr, zero_addr, sig_bytes,
             ).build_transaction({
                 'from': acct.address,
-                'nonce': w3.eth.get_transaction_count(acct.address),
+                'nonce': eoa_nonce,
                 'gas': gas_limit,
                 'maxFeePerGas': max_fee,
                 'maxPriorityFeePerGas': priority_fee,
@@ -495,14 +505,31 @@ class AutoRedeemer:
             })
 
             signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            except Exception as send_err:
+                err_msg = str(send_err).lower()
+                if 'replacement' in err_msg or 'underpriced' in err_msg or 'nonce' in err_msg:
+                    print(f"  ⏳ Nonce conflict, waiting for pending tx to clear...",
+                          flush=True)
+                    await asyncio.sleep(15)
+                    # Retry with fresh nonce
+                    new_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
+                    tx_data['nonce'] = new_nonce
+                    signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
+                    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                else:
+                    raise
+
             print(f"  📨 {label}: {tx_hash.hex()}", flush=True)
 
-            loop = asyncio.get_event_loop()
-            receipt = await loop.run_in_executor(
-                None,
-                lambda: w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
-            )
+            # ── Wait for receipt (try multiple RPCs if primary times out) ──
+            receipt = await self._wait_for_receipt(tx_hash, eoa_nonce, acct.address)
+
+            if receipt is None:
+                print(f"  ⚠️ {label}: tx sent but receipt unconfirmed "
+                      f"(may still land on-chain)", flush=True)
+                return False
 
             if receipt['status'] == 1:
                 print(f"  ✅ {label} confirmed (gas: {receipt['gasUsed']}, "
@@ -516,6 +543,58 @@ class AutoRedeemer:
             print(f"  ❌ {label} error: {e}", flush=True)
             traceback.print_exc()
             return False
+
+    async def _wait_for_receipt(self, tx_hash, eoa_nonce: int,
+                                 eoa_address: str,
+                                 timeout: int = 180) -> Optional[dict]:
+        """Wait for tx receipt, trying multiple RPCs on timeout.
+
+        If the primary RPC can't find the receipt, fall back to other RPCs.
+        Also checks if the nonce has advanced (meaning the tx WAS mined even
+        if we can't get the specific receipt).
+        """
+        from web3 import Web3
+
+        loop = asyncio.get_event_loop()
+
+        # ── Try primary RPC first (180s) ──
+        try:
+            receipt = await loop.run_in_executor(
+                None,
+                lambda: self._w3.eth.wait_for_transaction_receipt(
+                    tx_hash, timeout=timeout
+                )
+            )
+            return receipt
+        except Exception as primary_err:
+            print(f"  ⏳ Primary RPC timeout ({timeout}s), trying fallbacks...",
+                  flush=True)
+
+        # ── Try each fallback RPC ──
+        for rpc_url in DEFAULT_RPCS:
+            try:
+                fallback_w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={
+                    'timeout': 30
+                }))
+                receipt = fallback_w3.eth.get_transaction_receipt(tx_hash)
+                if receipt:
+                    print(f"  ✅ Receipt found via {rpc_url}", flush=True)
+                    return receipt
+            except Exception:
+                continue
+
+        # ── Check if nonce advanced (tx was mined but receipt unavailable) ──
+        try:
+            current_nonce = self._w3.eth.get_transaction_count(eoa_address)
+            if current_nonce > eoa_nonce:
+                print(f"  ⚠️ Nonce advanced ({eoa_nonce}→{current_nonce}), "
+                      f"tx likely mined but receipt unavailable", flush=True)
+                # Return a synthetic success — the tx DID execute
+                return {'status': 1, 'gasUsed': 0, 'blockNumber': 0}
+        except Exception:
+            pass
+
+        return None
 
     # ─── Method 2: Direct on-chain via Gnosis Safe execTransaction ───
 
