@@ -527,10 +527,10 @@ class LiveTrader:
         for _p in [signal.entry_price / 2, signal.entry_price / 2]:  # estimate
             tick_p = max(0.01, min(0.99, round(_p * 100) / 100))
             if use_fok_legs:
-                _shares = max(1, round(half_size / tick_p, 2))
+                _shares = max(1, round(half_size / tick_p, 4))
             else:
-                _shares = max(5, round(half_size / tick_p, 2))
-            leg_costs.append(round(tick_p * _shares, 6))
+                _shares = max(5, round(half_size / tick_p, 4))
+            leg_costs.append(round(tick_p * _shares, 2))
         needed = sum(leg_costs)
 
         if real_bal is not None and needed > real_bal:
@@ -652,25 +652,25 @@ class LiveTrader:
             if use_fok:
                 # ═══ FOK MODE: No 5-share minimum! $1 trades possible ═══
                 # FOK buy: specify dollar amount, API auto-calculates shares
-                shares = round(size / price, 2)
+                shares = round(size / price, 4)  # max 4 decimals (taker)
                 if shares < 1:
                     shares = 1  # Minimum 1 share
-                order_amount = round(price * shares, 6)
+                order_amount = round(price * shares, 2)  # max 2 decimals (maker)
                 if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
                     shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
-                    order_amount = round(price * shares, 6)
+                    order_amount = round(price * shares, 2)
                 order_type = OrderType.FOK
                 order_type_tag = 'FOK'
             else:
                 # ═══ GTC MODE: 5-share minimum, queue in orderbook ═══
                 MIN_SHARES = 5  # Polymarket CLOB minimum for GTC
-                raw_shares = round(size / price, 2)
+                raw_shares = round(size / price, 4)  # max 4 decimals (taker)
                 shares = max(MIN_SHARES, raw_shares)
-                order_amount = round(price * shares, 6)
+                order_amount = round(price * shares, 2)  # max 2 decimals (maker)
                 if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
                     shares = math.ceil(Config.POLYMARKET_MIN_ORDER_SIZE / price)
                     shares = max(MIN_SHARES, shares)
-                    order_amount = round(price * shares, 6)
+                    order_amount = round(price * shares, 2)
                 order_type = OrderType.GTC
                 order_type_tag = 'GTC'
 
@@ -779,7 +779,7 @@ class LiveTrader:
                         resp = await self._submit_order(signal.token_id, price, retry_shares, BUY, OT.GTC)
                         if resp and resp.get('status') != 'error':
                             order_id = resp.get('orderID', resp.get('id', str(uuid.uuid4())[:8]))
-                            actual_cost = round(price * retry_shares, 6)
+                            actual_cost = round(price * retry_shares, 2)  # max 2 decimals
                             print(f"✅ [GTC] RETRY PLACED: {order_id} (${actual_cost:.2f})", flush=True)
                             trade_id = str(uuid.uuid4())[:8]
                             trade = {
@@ -834,10 +834,21 @@ class LiveTrader:
         
         Runs synchronous py-clob-client calls in a thread executor to
         avoid blocking the asyncio event loop (each call takes 1-20s).
+        
+        Polymarket precision requirements:
+        - price (maker amount): max 2 decimal places
+        - size/shares (taker amount): max 4 decimal places
         """
         from py_clob_client.clob_types import OrderArgs, OrderType
         if order_type is None:
             order_type = OrderType.GTC
+
+        # ── Enforce Polymarket decimal precision ──
+        # Price: max 2 decimals (tick size 0.01)
+        price = round(float(price), 2)
+        # Size: max 4 decimals (avoid API rejection)
+        shares = round(float(shares), 4)
+
         order_args = OrderArgs(
             price=price,
             size=shares,
