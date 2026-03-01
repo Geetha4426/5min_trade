@@ -1,0 +1,10 @@
+name = "5min-relay"
+main = "cloudflare_worker.js"
+compatibility_date = "2024-01-01"
+
+# Workers free plan: 100,000 requests/day
+# No credit card required
+
+# Optional: Set AUTH_TOKEN to protect your relay
+# Run: wrangler secret put AUTH_TOKEN
+# Then enter your secret token

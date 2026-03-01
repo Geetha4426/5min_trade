@@ -1,14 +1,14 @@
 """
 Dynamic Strategy Picker — ALL-IN Edition with Win Rate Learning
 
-Runs ALL 11 strategies on every scan. Trades CONTINUOUSLY.
+Runs ALL 15 strategies on every scan. Trades CONTINUOUSLY.
 Uses the BalanceManager to adjust aggression based on balance tier.
 
 NEW: Strategy Win Rate Tracking (inspired by ThinkEnigmatic/bot-arena
 and PolyFlup's Bayesian A/B testing). Tracks which strategies actually
 win/lose over time and applies a performance multiplier to confidence scores.
 
-Strategies (11 total):
+Strategies (15 total):
 1. Cross-Timeframe Arb — GUARANTEED profit on overlapping markets
 2. YES+NO Arb — guaranteed profit arbitrage
 3. Cheap Outcome Hunter — buy at 1-8 cents for 100x
@@ -20,6 +20,10 @@ Strategies (11 total):
 9. Straddle — buy both sides during volatility
 10. Spread Scalper — profit from wide spreads
 11. Mid-Price Sniper — buy underpriced mid-range outcomes
+12. Mean Reversion Scalper — buy after crash, catch the bounce (NEW)
+13. Spike Fade — buy cheap opposite side when one spikes (NEW)
+14. Expiry Rush — aggressive last-60s momentum plays (NEW)
+15. Binance Momentum Sniper — catch Binance→Polymarket price lag (NEW)
 """
 
 from typing import Dict, List, Optional
@@ -34,6 +38,9 @@ from strategies.continuous import (
 from strategies.cross_timeframe_arb import CrossTimeframeArbStrategy
 from strategies.volatility_penny_sniper import VolatilityPennySniperStrategy
 from strategies.probability_closer import ProbabilityCloserStrategy
+from strategies.swing_scalpers import (
+    MeanReversionScalper, SpikeFade, ExpiryRush, BinanceMomentumSniper
+)
 
 
 class StrategyTracker:
@@ -108,13 +115,17 @@ class DynamicPicker(BaseStrategy):
     """
 
     name = "dynamic"
-    description = "All 11 strategies — trades continuously, adapts to balance + track record"
+    description = "All 15 strategies — trades continuously, adapts to balance + track record"
 
     def __init__(self):
         self.strategies: List[BaseStrategy] = [
             CrossTimeframeArbStrategy(),  # Guaranteed cross-TF arb
             YesNoArbStrategy(),           # Guaranteed profit
-            ProbabilityCloserStrategy(),  # Near-expiry high-conviction (NEW)
+            ProbabilityCloserStrategy(),  # Near-expiry high-conviction
+            MeanReversionScalper(),       # Buy after crash → bounce (NEW)
+            SpikeFade(),                  # Buy cheap opposite side (NEW)
+            ExpiryRush(),                 # Last-60s momentum plays (NEW)
+            BinanceMomentumSniper(),      # Binance→Poly price lag (NEW)
             CheapOutcomeHunter(),         # Lottery tickets
             MomentumReversal(),           # Catch dips
             OracleArbStrategy(),          # Chainlink delay exploit
@@ -178,6 +189,14 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.85, s.confidence + 0.05)  # Don't over-prioritize
             elif sig_type == 'prob_closer':
                 s.confidence = min(0.95, s.confidence + 0.15)  # High priority for safe returns
+            elif sig_type == 'mean_reversion':
+                s.confidence = min(0.95, s.confidence + 0.12)  # High priority: proven bounces
+            elif sig_type == 'spike_fade':
+                s.confidence = min(0.93, s.confidence + 0.10)  # High priority: fade extremes
+            elif sig_type == 'expiry_rush':
+                s.confidence = min(0.95, s.confidence + 0.12)  # Urgent: time-sensitive
+            elif sig_type == 'binance_momentum':
+                s.confidence = min(0.94, s.confidence + 0.12)  # High priority: real data edge
             elif sig_type in ('trend', 'mid_sniper'):
                 s.confidence = min(0.90, s.confidence + 0.05)
 

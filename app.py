@@ -128,7 +128,7 @@ class TradingEngine:
         Config.print_status()
         await self.db.init()
 
-        # Check Polymarket geoblock
+        # Check Polymarket geoblock (WEBSITE only — CLOB API is separate)
         try:
             import requests
             geo = requests.get('https://polymarket.com/api/geoblock', timeout=5).json()
@@ -137,13 +137,16 @@ class TradingEngine:
             region = geo.get('region', '?')
             blocked = geo.get('blocked', True)
             if blocked:
-                print(f"🚫 GEOBLOCKED! IP: {ip} | Country: {country} | Region: {region}", flush=True)
-                print(f"⚠️ Orders will be REJECTED. Change Railway region to a non-blocked country.", flush=True)
-                print(f"   Blocked: US, UK, DE, FR, IT, AU, SG, NL, etc. Try: IN, JP, BR, KR", flush=True)
+                print(f"⚠️ Website geo-blocked: IP {ip} | {country} | {region}", flush=True)
+                print(f"   ℹ️ NOTE: This checks the Polymarket WEBSITE, not the CLOB API.", flush=True)
+                print(f"   The CLOB API (clob.polymarket.com) works independently from most regions.", flush=True)
+                print(f"   EU-West Railway works fine for trading — poly_trade proved this.", flush=True)
+                if Config.is_relay_enabled():
+                    print(f"  🔀 Relay configured as fallback: {Config.get_clob_url()}", flush=True)
             else:
                 print(f"✅ Geoblock OK — IP: {ip} | Country: {country} | Region: {region}", flush=True)
         except Exception as e:
-            print(f"⚠️ Geoblock check failed: {e}", flush=True)
+            print(f"⚠️ Geoblock check failed: {e} (non-critical)", flush=True)
 
         # Initialize live trader (non-blocking — will just warn if no keys)
         live_ok = await self.live_trader.init()

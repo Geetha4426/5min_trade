@@ -45,51 +45,56 @@ LIVE_MODES = {
     'seed': LiveRiskMode(
         name='SEED',
         emoji='🌱',
-        max_bet_pct=100.0,      # Can bet 100% — we only trade guaranteed arbs
+        max_bet_pct=100.0,      # Can bet 100% — only high-confidence trades
         reserve_pct=0.0,        # Zero reserve — every cent counts at $1
         reserve_min=0.0,        # No minimum reserve
         max_pos_per_dollar=1.0, # 1 position per $1
-        max_positions_cap=1,    # Only 1 position at a time (focus)
-        min_confidence=0.90,    # ONLY near-guaranteed trades
-        description='$1 start — near-zero risk, arb-only until $5',
+        max_positions_cap=2,    # 2 positions (can do 1 arb = 2 legs)
+        min_confidence=0.88,    # High bar — only near-guaranteed trades fire
+        description='$1-5 start — ALL strategies, 0.88 confidence floor',
     ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
         emoji='🎯',
-        max_bet_pct=15.0,       # Max 15% per trade
-        reserve_pct=50.0,       # Keep 50% safe
+        max_bet_pct=20.0,       # Max 20% per trade
+        reserve_pct=40.0,       # Keep 40% safe
         reserve_min=2.0,        # Always keep $2
-        max_pos_per_dollar=0.2, # 1 position per $5
-        max_positions_cap=3,    # Max 3 positions
-        min_confidence=0.70,    # Only high-confidence trades
-        description='Safe growth — focus on multiplying initial balance',
+        max_pos_per_dollar=0.25,# 1 position per $4
+        max_positions_cap=4,    # Max 4 positions
+        min_confidence=0.65,    # High-confidence trades
+        description='$5-20 — focused growth with safety net',
     ),
     'medium': LiveRiskMode(
         name='MEDIUM',
         emoji='⚖️',
-        max_bet_pct=25.0,       # Max 25% per trade
-        reserve_pct=30.0,       # Keep 30% safe
-        reserve_min=1.50,       # Keep $1.50
-        max_pos_per_dollar=0.3, # 1 position per $3.33
-        max_positions_cap=6,    # Max 6 positions
-        min_confidence=0.50,    # Moderate confidence bar
-        description='Balanced — 1/3 risk ratio, steady growth',
+        max_bet_pct=30.0,       # Max 30% per trade
+        reserve_pct=25.0,       # Keep 25% safe
+        reserve_min=2.00,       # Keep $2
+        max_pos_per_dollar=0.35,# 1 position per ~$3
+        max_positions_cap=8,    # Max 8 positions
+        min_confidence=0.45,    # Moderate confidence bar
+        description='$20-100 — balanced risk, more strategies enabled',
     ),
     'aggressive': LiveRiskMode(
         name='AGGRESSIVE',
         emoji='🔥',
-        max_bet_pct=40.0,       # Max 40% per trade
+        max_bet_pct=45.0,       # Max 45% per trade
         reserve_pct=10.0,       # Keep 10%
         reserve_min=1.00,       # Keep $1 minimum
         max_pos_per_dollar=0.5, # 1 position per $2
-        max_positions_cap=10,   # Max 10 positions
-        min_confidence=0.35,    # Low bar — trade aggressively
-        description='Full compound — maximum growth, higher risk',
+        max_positions_cap=12,   # Max 12 positions
+        min_confidence=0.30,    # Low bar — trade aggressively
+        description='$100+ — full compound, all 15 strategies, maximum growth',
     ),
 }
 
-# Auto-graduation thresholds for seed mode
-SEED_GRADUATE_BALANCE = 5.0  # Graduate to concentration at $5
+# Auto-graduation thresholds
+# The bot progresses: seed → concentration → medium → aggressive
+GRADUATION_THRESHOLDS = {
+    'seed': ('concentration', 5.0),       # $5 → graduate to concentration
+    'concentration': ('medium', 20.0),    # $20 → graduate to medium
+    'medium': ('aggressive', 100.0),      # $100 → graduate to aggressive
+}
 
 
 class LiveBalanceManager:
@@ -267,49 +272,35 @@ class LiveBalanceManager:
 
     def check_auto_graduate(self) -> str:
         """
-        Check if seed mode should auto-graduate to concentration.
+        Check if current mode should auto-graduate to the next tier.
+        Progression: seed → concentration → medium → aggressive
         Returns message if graduated, empty string if not.
         """
-        if self.mode_name == 'seed' and self.balance >= SEED_GRADUATE_BALANCE:
-            self.set_mode('concentration')
-            return (
-                f"🎉 GRADUATED! Balance ${self.balance:.2f} reached ${SEED_GRADUATE_BALANCE:.2f}\n"
-                f"Auto-switched to 🎯 CONCENTRATION mode for safer growth."
-            )
+        grad = GRADUATION_THRESHOLDS.get(self.mode_name)
+        if grad:
+            next_mode, threshold = grad
+            if self.balance >= threshold:
+                self.set_mode(next_mode)
+                next_m = self.mode
+                return (
+                    f"🎉 GRADUATED! Balance ${self.balance:.2f} reached ${threshold:.2f}\n"
+                    f"Auto-switched to {next_m.emoji} {next_m.name}: {next_m.description}"
+                )
         return ''
 
     def get_strategy_filter(self) -> Dict:
-        """Which strategies are enabled at this mode."""
-        if self.mode_name == 'seed':
-            # SEED MODE: Only guaranteed-profit strategies
-            return {
-                'enabled': ['yes_no_arb', 'cross_tf_arb', 'oracle_arb'],
-                'disabled': ['straddle', 'trend_follower', 'penny_sniper',
-                           'cheap_hunter', 'momentum_reversal', 'spread_scalper',
-                           'mid_sniper', 'time_decay'],
-                'min_confidence': self.mode.min_confidence,
-            }
-        elif self.mode_name == 'concentration':
-            return {
-                'enabled': ['cheap_hunter', 'oracle_arb', 'yes_no_arb',
-                           'cross_tf_arb'],
-                'disabled': ['straddle', 'trend_follower', 'penny_sniper'],
-                'min_confidence': self.mode.min_confidence,
-            }
-        elif self.mode_name == 'medium':
-            return {
-                'enabled': ['cheap_hunter', 'oracle_arb', 'yes_no_arb',
-                           'cross_tf_arb', 'mid_sniper', 'spread_scalper',
-                           'penny_sniper'],
-                'disabled': ['straddle'],
-                'min_confidence': self.mode.min_confidence,
-            }
-        else:  # aggressive
-            return {
-                'enabled': 'all',
-                'disabled': [],
-                'min_confidence': self.mode.min_confidence,
-            }
+        """Which strategies are enabled at this mode.
+        
+        ALL modes enable ALL strategies — the confidence floor is the ONLY filter.
+        Each strategy's confidence formula already encodes its risk level.
+        A 0.90 confidence mean_reversion is just as safe as a 0.90 arb.
+        No arbitrary strategy whitelists — let the math decide.
+        """
+        return {
+            'enabled': 'all',
+            'disabled': [],
+            'min_confidence': self.mode.min_confidence,
+        }
 
     def get_status(self) -> Dict:
         return {

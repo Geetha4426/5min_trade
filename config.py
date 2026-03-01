@@ -43,11 +43,17 @@ class Config:
     POLYMARKET_LIVE_WS_URL = 'wss://ws-live-data.polymarket.com'
 
     # ═══════════════════════════════════════════════════════════════════
-    # PROXY (bypass Polymarket geoblock on Railway)
+    # PROXY / RELAY (bypass Polymarket geoblock on Railway)
     # ═══════════════════════════════════════════════════════════════════
-    # Set this to a proxy URL in a non-blocked country (IN, JP, BR, KR)
-    # Formats: http://host:port  |  socks5://host:port  |  socks5://user:pass@host:port
+    # Option 1: HTTP/SOCKS proxy
     PROXY_URL = os.getenv('PROXY_URL', '')
+
+    # Option 2: CLOB relay server (recommended — same as poly_trade)
+    # Deploy relay_server.py on a VPS in an allowed region, or use Cloudflare Worker.
+    # Set CLOB_RELAY_URL to your relay endpoint. Orders are signed locally;
+    # only the signed request is forwarded through the relay.
+    CLOB_RELAY_URL = os.getenv('CLOB_RELAY_URL', '')
+    CLOB_RELAY_AUTH_TOKEN = os.getenv('CLOB_RELAY_AUTH_TOKEN', '')  # Optional auth for relay
 
     # ═══════════════════════════════════════════════════════════════════
     # TRADING MODE
@@ -167,6 +173,18 @@ class Config:
         return cls.TRADING_MODE.lower() == 'paper'
 
     @classmethod
+    def get_clob_url(cls) -> str:
+        """Get effective CLOB API URL — relay if configured, else direct."""
+        if cls.CLOB_RELAY_URL:
+            return cls.CLOB_RELAY_URL.rstrip('/')
+        return cls.CLOB_API_URL
+
+    @classmethod
+    def is_relay_enabled(cls) -> bool:
+        """Check if CLOB relay is configured (bypasses geo-blocking)."""
+        return bool(cls.CLOB_RELAY_URL)
+
+    @classmethod
     def is_live_ready(cls) -> bool:
         """Check if minimum live trading config is set (just private key)."""
         pk = cls.POLY_PRIVATE_KEY.strip() if cls.POLY_PRIVATE_KEY else ''
@@ -240,5 +258,6 @@ class Config:
                 print(f"  Proxy Wallet: {proxy[:8]}...{proxy[-4:]}" if proxy else "  Proxy Wallet: ❌ NOT SET — set POLY_PROXY_WALLET!", flush=True)
             print(f"  API Creds: {'🔑 auto-derive from key' if api_auto else '✅ manually set'}", flush=True)
             print(f"  Sig Type: {cls.POLY_SIGNATURE_TYPE} ({'EOA/MetaMask' if cls.POLY_SIGNATURE_TYPE == 0 else 'Email/Magic' if cls.POLY_SIGNATURE_TYPE == 1 else 'Proxy'})", flush=True)
+        print(f"🔀 CLOB Relay: {'✅ ' + cls.CLOB_RELAY_URL if cls.is_relay_enabled() else '❌ Direct (may be geo-blocked)'}", flush=True)
         print(f"Balance: ${cls.STARTING_BALANCE:.2f}", flush=True)
         print(f"{'='*60}\n", flush=True)

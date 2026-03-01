@@ -97,7 +97,10 @@ class LiveTrader:
             from py_clob_client.clob_types import ApiCreds
             print(f"🔑 Initializing CLOB client...", flush=True)
 
-            host = Config.CLOB_API_URL
+            # Use relay URL if configured (bypasses geo-blocking)
+            host = Config.get_clob_url()
+            if Config.is_relay_enabled():
+                print(f"  🔀 Using CLOB relay: {host}", flush=True)
             chain_id = Config.POLY_CHAIN_ID  # 137 = Polygon
             sig_type = Config.POLY_SIGNATURE_TYPE  # 0=EOA, 1=Magic, 2=Proxy
 
@@ -137,6 +140,10 @@ class LiveTrader:
                 funder=funder,
             )
 
+            # Inject relay auth token if using relay
+            if Config.is_relay_enabled() and Config.CLOB_RELAY_AUTH_TOKEN:
+                self._patch_relay_auth()
+
             # Step 2: Set or derive API credentials
             # NOTE: POLY_API_KEY/SECRET/PASSPHRASE are auto-derived from your private key.
             # You do NOT need to set them manually. Leave them blank in Railway.
@@ -165,9 +172,15 @@ class LiveTrader:
             # Step 3: Test connection
             try:
                 ok = self.clob_client.get_ok()
-                print(f"🟢 CLOB connection: {ok}", flush=True)
+                via = " via relay" if Config.is_relay_enabled() else ""
+                print(f"🟢 CLOB connection{via}: {ok}", flush=True)
             except Exception as e:
                 print(f"⚠️ CLOB connection test failed: {e}", flush=True)
+                err_str = str(e).lower()
+                if 'forbidden' in err_str or '403' in err_str or 'geo' in err_str:
+                    if not Config.is_relay_enabled():
+                        print(f"💡 TIP: Set CLOB_RELAY_URL to bypass geo-blocking.", flush=True)
+                        print(f"   Deploy relay_server.py on a VPS in an allowed region.", flush=True)
                 # Non-fatal — might still work
 
             # Step 4: Fetch dynamic fee rate
@@ -228,6 +241,27 @@ class LiveTrader:
     @property
     def is_ready(self) -> bool:
         return self._initialized and self.clob_client is not None
+
+    def _patch_relay_auth(self):
+        """Inject relay auth token into ClobClient's HTTP session.
+        
+        Orders are signed locally — the relay only forwards the signed request.
+        The auth token prevents unauthorized use of your relay endpoint.
+        """
+        try:
+            session = getattr(self.clob_client, 'session', None)
+            if session is None:
+                http = getattr(self.clob_client, 'http', None)
+                if http:
+                    session = getattr(http, 'session', None)
+
+            if session and hasattr(session, 'headers'):
+                session.headers['Authorization'] = f'Bearer {Config.CLOB_RELAY_AUTH_TOKEN}'
+                print(f"  🔑 Relay auth token injected", flush=True)
+            else:
+                print(f"  ⚠️ Could not inject relay auth token (session not found)", flush=True)
+        except Exception as e:
+            print(f"  ⚠️ Relay auth injection failed: {e}", flush=True)
 
     async def fetch_balance(self) -> float:
         """
@@ -527,9 +561,9 @@ class LiveTrader:
         for _p in [signal.entry_price / 2, signal.entry_price / 2]:  # estimate
             tick_p = max(0.01, min(0.99, round(_p * 100) / 100))
             if use_fok_legs:
-                _shares = max(1, round(half_size / tick_p, 4))
+                _shares = max(1, math.floor(half_size / tick_p * 100) / 100)
             else:
-                _shares = max(5, round(half_size / tick_p, 4))
+                _shares = max(5, math.floor(half_size / tick_p * 100) / 100)
             leg_costs.append(round(tick_p * _shares, 2))
         needed = sum(leg_costs)
 
@@ -652,7 +686,7 @@ class LiveTrader:
             if use_fok:
                 # ═══ FOK MODE: No 5-share minimum! $1 trades possible ═══
                 # FOK buy: specify dollar amount, API auto-calculates shares
-                shares = round(size / price, 4)  # max 4 decimals (taker)
+                shares = math.floor(size / price * 100) / 100  # floor to 2dp (matches CLOB library)
                 if shares < 1:
                     shares = 1  # Minimum 1 share
                 order_amount = round(price * shares, 2)  # max 2 decimals (maker)
@@ -664,7 +698,7 @@ class LiveTrader:
             else:
                 # ═══ GTC MODE: 5-share minimum, queue in orderbook ═══
                 MIN_SHARES = 5  # Polymarket CLOB minimum for GTC
-                raw_shares = round(size / price, 4)  # max 4 decimals (taker)
+                raw_shares = math.floor(size / price * 100) / 100  # floor to 2dp (matches CLOB library)
                 shares = max(MIN_SHARES, raw_shares)
                 order_amount = round(price * shares, 2)  # max 2 decimals (maker)
                 if order_amount < Config.POLYMARKET_MIN_ORDER_SIZE:
@@ -836,8 +870,14 @@ class LiveTrader:
         avoid blocking the asyncio event loop (each call takes 1-20s).
         
         Polymarket precision requirements:
-        - price (maker amount): max 2 decimal places
-        - size/shares (taker amount): max 4 decimal places
+        - price: max 2 decimal places (tick size 0.01)
+        - size/shares: max 2 decimal places (py-clob-client rounds to 2dp)
+        - price × shares (maker_amount): max 2 decimal places
+        
+        The py-clob-client library rounds size to 2dp internally but does NOT
+        ensure the product has ≤ 2dp. The CLOB API server rejects orders where
+        maker_amount has > 2 decimal places. This method enforces that constraint
+        by adjusting shares to the nearest valid step.
         """
         from py_clob_client.clob_types import OrderArgs, OrderType
         if order_type is None:
@@ -846,8 +886,20 @@ class LiveTrader:
         # ── Enforce Polymarket decimal precision ──
         # Price: max 2 decimals (tick size 0.01)
         price = round(float(price), 2)
-        # Size: max 4 decimals (avoid API rejection)
-        shares = round(float(shares), 4)
+        # Size: floor to 2 decimals (matches py-clob-client's round_down(size, 2))
+        shares = math.floor(float(shares) * 100) / 100
+
+        # ── FIX: Ensure price × shares has ≤ 2 decimal places ──
+        # The CLOB API rejects BUY orders where maker_amount = price × shares
+        # exceeds 2 decimal places (e.g. 0.77 × 1.30 = 1.001 → 3dp → rejected).
+        # For the product (P/100)×(S/100) = P×S/10000 to have ≤ 2dp,
+        # P×S must be divisible by 100. Valid share steps depend on the price.
+        P = int(round(price * 100))
+        S = int(math.floor(shares * 100))
+        if P > 0 and S > 0:
+            step = 100 // math.gcd(P, 100)  # shares_cents must be multiple of this
+            S = (S // step) * step
+            shares = S / 100.0
 
         order_args = OrderArgs(
             price=price,
