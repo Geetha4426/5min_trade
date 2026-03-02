@@ -485,8 +485,8 @@ class AutoRedeemer:
             # Use actual gas_price + small buffer. NO hard cap — the
             # network sets the price, we just need to match it.
             gas_price = w3.eth.gas_price  # Real-time from Alchemy
-            max_fee = gas_price + w3.to_wei(3, 'gwei')  # Tiny buffer over current
-            max_fee = max(max_fee, w3.to_wei(30, 'gwei'))  # Floor at 30 gwei
+            max_fee = gas_price + w3.to_wei(25, 'gwei')  # Must cover 25 gwei min tip
+            max_fee = max(max_fee, w3.to_wei(50, 'gwei'))  # Floor at 50 gwei
 
             # ── Pre-flight: check MATIC balance vs estimated cost ──
             estimated_cost = gas_limit * max_fee
@@ -536,7 +536,7 @@ class AutoRedeemer:
             }]
 
             safe = w3.eth.contract(address=safe_addr, abi=exec_abi)
-            priority_fee = min(w3.to_wei(3, 'gwei'), max_fee - 1)  # Small tip
+            priority_fee = min(w3.to_wei(25, 'gwei'), max_fee - 1)  # Polygon min 25 gwei
             eoa_nonce = confirmed_nonce
 
             tx_data = safe.functions.execTransaction(
@@ -855,9 +855,9 @@ class AutoRedeemer:
             w3 = self._w3
             acct = Account.from_key(self._private_key)
             gas_price = w3.eth.gas_price  # Real-time
-            max_fee = gas_price + w3.to_wei(3, 'gwei')
-            max_fee = max(max_fee, w3.to_wei(30, 'gwei'))
-            priority_fee = min(w3.to_wei(3, 'gwei'), max_fee - 1)
+            max_fee = gas_price + w3.to_wei(25, 'gwei')
+            max_fee = max(max_fee, w3.to_wei(50, 'gwei'))
+            priority_fee = min(w3.to_wei(25, 'gwei'), max_fee - 1)  # Polygon min 25 gwei
             nonce = w3.eth.get_transaction_count(acct.address, 'latest')
             tx = {
                 'from': acct.address,
