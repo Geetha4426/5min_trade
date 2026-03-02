@@ -478,15 +478,17 @@ class AutoRedeemer:
             acct = Account.from_key(self._private_key)
 
             # ── Pre-flight: get confirmed nonce ──
-            # NOTE: Polygon RPC 'pending' tag is unreliable (Alchemy often
-            # returns stale values showing "pending" txs that are already
-            # confirmed). We use 'latest' only and handle nonce conflicts
-            # via send_raw_transaction error handling.
             confirmed_nonce = w3.eth.get_transaction_count(acct.address, 'latest')
 
+            # ── Gas pricing: real-time from network ──
+            # Polygon gas fluctuates widely (30-300+ gwei).
+            # Use actual gas_price + small buffer. NO hard cap — the
+            # network sets the price, we just need to match it.
+            gas_price = w3.eth.gas_price  # Real-time from Alchemy
+            max_fee = gas_price + w3.to_wei(3, 'gwei')  # Tiny buffer over current
+            max_fee = max(max_fee, w3.to_wei(30, 'gwei'))  # Floor at 30 gwei
+
             # ── Pre-flight: check MATIC balance vs estimated cost ──
-            gas_price = w3.eth.gas_price
-            max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
             estimated_cost = gas_limit * max_fee
             matic_balance = w3.eth.get_balance(acct.address)
             if matic_balance < estimated_cost * 12 // 10:  # Need 120% of estimate
@@ -534,8 +536,8 @@ class AutoRedeemer:
             }]
 
             safe = w3.eth.contract(address=safe_addr, abi=exec_abi)
-            priority_fee = min(w3.to_wei(30, 'gwei'), max_fee - 1)
-            eoa_nonce = confirmed_nonce  # Use confirmed nonce (no pending txs at this point)
+            priority_fee = min(w3.to_wei(3, 'gwei'), max_fee - 1)  # Small tip
+            eoa_nonce = confirmed_nonce
 
             tx_data = safe.functions.execTransaction(
                 target, 0, inner_data, 0,
@@ -554,7 +556,12 @@ class AutoRedeemer:
                 tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             except Exception as send_err:
                 err_msg = str(send_err).lower()
-                if 'nonce' in err_msg or 'replacement' in err_msg or 'already known' in err_msg:
+                if 'insufficient funds' in err_msg:
+                    # Other queued txs are eating the gas budget — skip gracefully
+                    print(f"  ⛽ {label}: insufficient funds (queued txs consuming balance). "
+                          f"Will retry next cycle.", flush=True)
+                    return False
+                elif 'nonce' in err_msg or 'replacement' in err_msg or 'already known' in err_msg:
                     # Nonce collision — a previous tx already used this nonce.
                     # Retry once with incremented nonce.
                     print(f"  ⚠️ Nonce conflict, retrying with nonce {eoa_nonce + 1}...", flush=True)
@@ -847,14 +854,16 @@ class AutoRedeemer:
             from eth_account import Account
             w3 = self._w3
             acct = Account.from_key(self._private_key)
-            gas_price = w3.eth.gas_price
-            max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
-            priority_fee = min(w3.to_wei(30, 'gwei'), max_fee - 1)
+            gas_price = w3.eth.gas_price  # Real-time
+            max_fee = gas_price + w3.to_wei(3, 'gwei')
+            max_fee = max(max_fee, w3.to_wei(30, 'gwei'))
+            priority_fee = min(w3.to_wei(3, 'gwei'), max_fee - 1)
+            nonce = w3.eth.get_transaction_count(acct.address, 'latest')
             tx = {
                 'from': acct.address,
                 'to': Web3.to_checksum_address(target),
                 'data': '0x' + calldata.hex(),
-                'nonce': w3.eth.get_transaction_count(acct.address),
+                'nonce': nonce,
                 'gas': gas_limit,
                 'maxFeePerGas': max_fee,
                 'maxPriorityFeePerGas': priority_fee,
