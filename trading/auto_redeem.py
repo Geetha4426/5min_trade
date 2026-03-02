@@ -197,6 +197,10 @@ class AutoRedeemer:
         self._last_check = now
 
         try:
+            # ── Clear any stuck pending txs before doing real work ──
+            if self._w3:
+                await self._clear_pending_txs()
+
             # ── Pre-flight: check EOA has enough MATIC for gas ──
             # Each redeem tx costs ~0.05-0.13 MATIC. If balance is too low,
             # skip ALL redeems to avoid spamming "insufficient funds" errors.
@@ -451,6 +455,101 @@ class AutoRedeemer:
             print(f"  ❌ Relayer redeem error: {e}", flush=True)
             return False
 
+    # ─── Pending-tx cleanup ──────────────────────────────────────────
+
+    async def _clear_pending_txs(self) -> bool:
+        """Cancel stuck pending txs with a single high-gas self-transfer.
+
+        If pending nonce > confirmed nonce, there are stuck txs in the
+        mempool.  Send ONE 0-value self-transfer at the confirmed nonce
+        with very high gas to replace the stuck tx.  Once it confirms,
+        all queued txs behind it are dropped (stale nonce).
+
+        Returns True if clear (no stuck txs or successfully cancelled).
+        """
+        if not self._w3:
+            return True
+
+        try:
+            from eth_account import Account
+            w3 = self._w3
+            acct = Account.from_key(self._private_key)
+
+            confirmed = w3.eth.get_transaction_count(acct.address, 'latest')
+            pending = w3.eth.get_transaction_count(acct.address, 'pending')
+
+            if pending <= confirmed:
+                return True  # Nothing stuck
+
+            stuck = pending - confirmed
+            print(f"⚠️ {stuck} stuck pending tx(s) at nonce {confirmed}+. "
+                  f"Sending cancel tx...", flush=True)
+
+            # Very high gas to guarantee replacement (prior stuck txs
+            # used 25-50 gwei tips; we use 75)
+            gas_price = w3.eth.gas_price
+            cancel_tip = w3.to_wei(75, 'gwei')
+            cancel_max = gas_price + cancel_tip
+            cancel_max = max(cancel_max, w3.to_wei(150, 'gwei'))
+
+            # Simple transfer = 21k gas, cheap enough
+            cancel_cost = 21_000 * cancel_max
+            balance = w3.eth.get_balance(acct.address)
+            if balance < cancel_cost:
+                print(f"  ⛽ Can't afford cancel tx "
+                      f"({cancel_cost / 1e18:.4f} POL > "
+                      f"{balance / 1e18:.4f} POL)", flush=True)
+                return False
+
+            tx = {
+                'from': acct.address,
+                'to': acct.address,  # Self-transfer (cancel)
+                'value': 0,
+                'nonce': confirmed,
+                'gas': 21_000,
+                'maxFeePerGas': cancel_max,
+                'maxPriorityFeePerGas': cancel_tip,
+                'chainId': 137,
+            }
+
+            signed = w3.eth.account.sign_transaction(tx, self._private_key)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            print(f"  📨 Cancel tx: {tx_hash.hex()} "
+                  f"(nonce={confirmed}, tip={cancel_tip / 1e9:.0f} gwei)",
+                  flush=True)
+
+            loop = asyncio.get_event_loop()
+            receipt = await loop.run_in_executor(
+                None,
+                lambda: w3.eth.wait_for_transaction_receipt(
+                    tx_hash, timeout=90
+                )
+            )
+
+            if receipt['status'] == 1:
+                print(f"  ✅ Stuck txs cleared! "
+                      f"(gas used: {receipt['gasUsed']})", flush=True)
+                return True
+            else:
+                print(f"  ❌ Cancel tx reverted", flush=True)
+                return False
+
+        except Exception as e:
+            err_msg = str(e).lower()
+            if 'nonce too low' in err_msg:
+                # Stuck tx confirmed while we were building — all clear
+                print(f"  ✅ Stuck tx already confirmed, queue clear",
+                      flush=True)
+                return True
+            if 'already known' in err_msg:
+                # Our cancel is already in mempool — wait for it
+                print(f"  ⏳ Cancel tx already in mempool, waiting...",
+                      flush=True)
+                await asyncio.sleep(15)
+                return True
+            print(f"  ⚠️ Clear pending txs error: {e}", flush=True)
+            return False
+
     # ─── Generic Safe transaction execution ─────────────────────────
 
     async def _execute_via_safe(self, target: str, inner_data: bytes,
@@ -557,17 +656,37 @@ class AutoRedeemer:
             except Exception as send_err:
                 err_msg = str(send_err).lower()
                 if 'insufficient funds' in err_msg:
-                    # Other queued txs are eating the gas budget — skip gracefully
                     print(f"  ⛽ {label}: insufficient funds (queued txs consuming balance). "
                           f"Will retry next cycle.", flush=True)
                     return False
-                elif 'nonce' in err_msg or 'replacement' in err_msg or 'already known' in err_msg:
-                    # Nonce collision — a previous tx already used this nonce.
-                    # Retry once with incremented nonce.
-                    print(f"  ⚠️ Nonce conflict, retrying with nonce {eoa_nonce + 1}...", flush=True)
+                elif 'replacement' in err_msg and 'underpriced' in err_msg:
+                    # Stuck pending tx at same nonce — bump gas aggressively
+                    bumped_fee = max_fee * 3
+                    bumped_tip = min(w3.to_wei(75, 'gwei'), bumped_fee - 1)
+                    print(f"  ⚠️ Replacing stuck tx at nonce {eoa_nonce} "
+                          f"(gas {max_fee/1e9:.0f}→{bumped_fee/1e9:.0f} gwei)...", flush=True)
+                    tx_data['maxFeePerGas'] = bumped_fee
+                    tx_data['maxPriorityFeePerGas'] = bumped_tip
+                    signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
+                    try:
+                        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                    except Exception as retry_err:
+                        print(f"  ❌ {label}: replacement also failed: {retry_err}", flush=True)
+                        return False
+                elif 'nonce too low' in err_msg:
+                    # Prior tx already confirmed — use next nonce
+                    print(f"  ⚠️ Nonce already used, retrying with {eoa_nonce + 1}...", flush=True)
                     tx_data['nonce'] = eoa_nonce + 1
                     signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
-                    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                    try:
+                        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                    except Exception as retry_err:
+                        print(f"  ❌ {label}: nonce retry also failed: {retry_err}", flush=True)
+                        return False
+                elif 'already known' in err_msg:
+                    # Same tx already in mempool — compute hash and wait
+                    print(f"  ⚠️ Tx already in mempool, waiting for it...", flush=True)
+                    tx_hash = w3.keccak(signed_tx.raw_transaction)
                 else:
                     raise
 
@@ -777,6 +896,12 @@ class AutoRedeemer:
         if not self._w3 or self._method not in ("direct", "direct_eoa"):
             return False
 
+        # ── Clear any stuck pending txs first ──
+        cleared = await self._clear_pending_txs()
+        if not cleared:
+            print("⚠️ Could not clear stuck txs — skipping approvals", flush=True)
+            return False
+
         from web3 import Web3
         from eth_abi import encode
 
@@ -871,7 +996,40 @@ class AutoRedeemer:
                 'value': 0,
             }
             signed_tx = w3.eth.account.sign_transaction(tx, self._private_key)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            except Exception as send_err:
+                err_msg = str(send_err).lower()
+                if 'insufficient funds' in err_msg:
+                    print(f"  ⛽ {label}: insufficient funds. Will retry next cycle.", flush=True)
+                    return False
+                elif 'replacement' in err_msg and 'underpriced' in err_msg:
+                    bumped_fee = max_fee * 3
+                    bumped_tip = min(w3.to_wei(75, 'gwei'), bumped_fee - 1)
+                    print(f"  ⚠️ Replacing stuck tx at nonce {nonce} "
+                          f"(gas {max_fee/1e9:.0f}→{bumped_fee/1e9:.0f} gwei)...", flush=True)
+                    tx['maxFeePerGas'] = bumped_fee
+                    tx['maxPriorityFeePerGas'] = bumped_tip
+                    signed_tx = w3.eth.account.sign_transaction(tx, self._private_key)
+                    try:
+                        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                    except Exception as retry_err:
+                        print(f"  ❌ {label}: replacement also failed: {retry_err}", flush=True)
+                        return False
+                elif 'nonce too low' in err_msg:
+                    print(f"  ⚠️ Nonce already used, retrying with {nonce + 1}...", flush=True)
+                    tx['nonce'] = nonce + 1
+                    signed_tx = w3.eth.account.sign_transaction(tx, self._private_key)
+                    try:
+                        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                    except Exception as retry_err:
+                        print(f"  ❌ {label}: nonce retry also failed: {retry_err}", flush=True)
+                        return False
+                elif 'already known' in err_msg:
+                    print(f"  ⚠️ Tx already in mempool, waiting for it...", flush=True)
+                    tx_hash = w3.keccak(signed_tx.raw_transaction)
+                else:
+                    raise
             print(f"  📨 {label}: {tx_hash.hex()}", flush=True)
             loop = asyncio.get_event_loop()
             receipt = await loop.run_in_executor(
