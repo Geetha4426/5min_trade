@@ -120,26 +120,27 @@ class AutoRedeemer:
                 )
                 self._method = "relayer"
                 self._enabled = True
-                print("✅ Auto-redeem: gasless builder relayer", flush=True)
-                return True
+                print("✅ Auto-redeem: gasless builder relayer (primary)", flush=True)
             except Exception as e:
                 self._init_errors.append(f"Relayer init: {e}")
 
-        # ── Method 2: Direct on-chain via Gnosis Safe (proxy wallets) ──
-        if self.sig_type == 2 and self._proxy_wallet:
-            ok = self._init_web3()
-            if ok:
-                self._method = "direct"
-                self._enabled = True
-                return True
+        # ── Always init web3 as fallback (even if relayer works) ──
+        self._init_web3()
 
-        # ── Method 3: Direct on-chain for EOA wallets ──
-        if self.sig_type != 2:
-            ok = self._init_web3()
-            if ok:
-                self._method = "direct_eoa"
+        # ── If relayer failed, use direct on-chain as primary ──
+        if not self._enabled:
+            if self._w3:
+                if self.sig_type == 2 and self._proxy_wallet:
+                    self._method = "direct"
+                else:
+                    self._method = "direct_eoa"
                 self._enabled = True
-                return True
+                print(f"✅ Auto-redeem: direct on-chain "
+                      f"({'Safe' if self.sig_type == 2 else 'EOA'})", flush=True)
+            else:
+                self._method = "none"
+        elif self._w3:
+            print("✅ Auto-redeem: direct on-chain ready as fallback", flush=True)
 
         if not self._enabled:
             print(f"⚠️ Auto-redeem disabled: "
@@ -162,8 +163,8 @@ class AutoRedeemer:
                         self._w3 = w3
                         # Mask API keys in log output
                         display_url = rpc_url.split('/v2/')[0] + '/v2/***' if '/v2/' in rpc_url else rpc_url[:40]
-                        print(f"✅ Auto-redeem: direct on-chain "
-                              f"({'Safe' if self.sig_type == 2 else 'EOA'}) "
+                        role = "fallback" if self._relayer else "primary"
+                        print(f"✅ Auto-redeem: web3 connected ({role}) "
                               f"via {display_url}", flush=True)
                         return True
                 except Exception:
@@ -204,8 +205,9 @@ class AutoRedeemer:
             # ── Pre-flight: check EOA has enough MATIC for gas ──
             # Each redeem tx costs ~0.05-0.13 MATIC. If balance is too low,
             # skip ALL redeems to avoid spamming "insufficient funds" errors.
+            # Skip this check if relayer is available (gasless).
             try:
-                if self._w3:
+                if self._w3 and not self._relayer:
                     from eth_account import Account
                     acct = Account.from_key(self._private_key)
                     matic_balance = self._w3.eth.get_balance(acct.address)
@@ -411,13 +413,21 @@ class AutoRedeemer:
     # ─── Redemption dispatch ──────────────────────────────────────────
 
     async def _redeem(self, condition_id: str, neg_risk: bool) -> bool:
-        """Redeem using the best available method."""
-        if self._method == "relayer":
-            return await self._redeem_via_relayer(condition_id, neg_risk)
-        elif self._method == "direct":
-            return await self._redeem_via_safe(condition_id, neg_risk)
-        elif self._method == "direct_eoa":
-            return await self._redeem_via_eoa(condition_id, neg_risk)
+        """Redeem using best method. Relayer first, direct on-chain fallback."""
+        # Try gasless relayer first
+        if self._relayer:
+            ok = await self._redeem_via_relayer(condition_id, neg_risk)
+            if ok:
+                return True
+            print(f"  ⚠️ Relayer failed, trying direct on-chain...", flush=True)
+
+        # Fallback: direct on-chain
+        if self._w3:
+            if self.sig_type == 2 and self._proxy_wallet:
+                return await self._redeem_via_safe(condition_id, neg_risk)
+            else:
+                return await self._redeem_via_eoa(condition_id, neg_risk)
+
         return False
 
     @staticmethod
@@ -947,14 +957,15 @@ class AutoRedeemer:
 
         Returns True if all approvals are OK (already set or newly set).
         """
-        if not self._w3 or self._method not in ("direct", "direct_eoa"):
+        if not self._w3 and not self._relayer:
             return False
 
-        # ── Clear any stuck pending txs first ──
-        cleared = await self._clear_pending_txs()
-        if not cleared:
-            print("⚠️ Could not clear stuck txs — skipping approvals", flush=True)
-            return False
+        # ── Clear any stuck pending txs first (only if using on-chain) ──
+        if self._w3:
+            cleared = await self._clear_pending_txs()
+            if not cleared and not self._relayer:
+                print("⚠️ Could not clear stuck txs — skipping approvals", flush=True)
+                return False
 
         from web3 import Web3
         from eth_abi import encode
@@ -973,7 +984,7 @@ class AutoRedeemer:
             try:
                 needs_approval = force
 
-                if not force:
+                if not force and self._w3:
                     owner_pad = owner.lower().replace('0x', '').zfill(64)
                     op_pad = exchange.lower().replace('0x', '').zfill(64)
                     result = self._w3.eth.call({
@@ -985,6 +996,9 @@ class AutoRedeemer:
                     if approved:
                         print(f"✅ CTF approval ({label}): approved", flush=True)
                         continue
+                    needs_approval = True
+                elif not force:
+                    # No web3 to check — assume needs approval
                     needs_approval = True
 
                 if needs_approval:
@@ -999,16 +1013,54 @@ class AutoRedeemer:
                         [Web3.to_checksum_address(exchange), True]
                     )
 
-                if self._method == "direct":
-                    ok = await self._execute_via_safe(
-                        CTF_ADDRESS, calldata, gas_limit=120_000,
-                        label=f"Approve {label}"
-                    )
-                else:
-                    ok = await self._execute_eoa_call(
-                        CTF_ADDRESS, calldata, gas_limit=120_000,
-                        label=f"Approve {label}"
-                    )
+                # Try gasless relayer first for approval
+                ok = False
+                if self._relayer:
+                    try:
+                        from py_builder_relayer_client.models import SafeTransaction, OperationType
+                        rtx = SafeTransaction(
+                            to=CTF_ADDRESS, operation=OperationType.Call,
+                            data="0x" + calldata.hex(), value="0",
+                        )
+                        resp = self._relayer.execute([rtx], f"Approve {label}")
+                        tx_id = getattr(resp, 'transaction_id', str(resp))
+                        print(f"  📨 Relayer approval ({label}): {tx_id}", flush=True)
+                        for _ in range(15):
+                            await asyncio.sleep(3)
+                            try:
+                                status = self._relayer.get_transaction(tx_id)
+                                if isinstance(status, list):
+                                    status = status[0] if status else {}
+                                state = (status.get("state", "") if isinstance(status, dict)
+                                         else str(status))
+                                if "CONFIRMED" in state.upper():
+                                    ok = True
+                                    break
+                                if "FAILED" in state.upper() or "INVALID" in state.upper():
+                                    break
+                            except Exception:
+                                continue
+                        if ok:
+                            pass  # fall through to success check below
+                        else:
+                            print(f"  ⚠️ Relayer approval failed, trying direct...",
+                                  flush=True)
+                    except Exception as re:
+                        print(f"  ⚠️ Relayer approval error: {re}, trying direct...",
+                              flush=True)
+
+                # Fallback: direct on-chain
+                if not ok and self._w3:
+                    if self.sig_type == 2 and self._proxy_wallet:
+                        ok = await self._execute_via_safe(
+                            CTF_ADDRESS, calldata, gas_limit=120_000,
+                            label=f"Approve {label}"
+                        )
+                    else:
+                        ok = await self._execute_eoa_call(
+                            CTF_ADDRESS, calldata, gas_limit=120_000,
+                            label=f"Approve {label}"
+                        )
 
                 if ok:
                     print(f"✅ CTF approval ({label}): now approved!", flush=True)
