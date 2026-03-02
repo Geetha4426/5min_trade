@@ -247,9 +247,6 @@ class TradingEngine:
             except Exception as e:
                 print(f"⚠️ Auto-redeem init failed: {e}", flush=True)
                 self.auto_redeemer = None
-
-            # Give live_trader a reference to the engine (for on-chain approval fix)
-            self.live_trader._engine = self
         else:
             print("📋 Paper trading only (no live credentials)", flush=True)
             self.trading_mode = 'paper'

@@ -197,6 +197,8 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.95, s.confidence + 0.12)  # Urgent: time-sensitive
             elif sig_type == 'binance_momentum':
                 s.confidence = min(0.94, s.confidence + 0.12)  # High priority: real data edge
+            elif sig_type == 'time_decay':
+                s.confidence = min(0.95, s.confidence + 0.08)  # Binance-confirmed near-expiry
             elif sig_type in ('trend', 'mid_sniper'):
                 s.confidence = min(0.90, s.confidence + 0.05)
 

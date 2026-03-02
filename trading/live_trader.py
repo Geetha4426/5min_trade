@@ -1294,78 +1294,26 @@ class LiveTrader:
         return 'hold'
 
     async def _ensure_conditional_allowance(self, token_id: str) -> bool:
-        """Refresh & verify conditional token allowance before selling.
+        """Refresh conditional token allowance before selling.
         
-        update_balance_allowance is a GET request that asks the CLOB server
-        to re-read the on-chain token balance & allowance.  It does NOT set
-        the on-chain setApprovalForAll — that must already be done (e.g. via
-        the Polymarket frontend or auto_redeemer.ensure_ctf_approval).
+        This fires update_balance_allowance (a GET that tells the CLOB to
+        re-read on-chain state) and immediately returns True.
         
-        Returns True if ready to sell (balance > 0).
-        NOTE: allowance=0 from the CLOB is treated as a WARNING, not a blocker.
-        On-chain approval is verified separately at startup. If the CLOB's
-        cache is stale, the sell order itself will tell us if approval is missing.
+        On-chain setApprovalForAll is ensured at startup. The CLOB's cached
+        allowance value is often stale/zero — we never block sells on it.
+        This is the same pattern poly_trade uses successfully.
         """
-        import asyncio
-        MAX_RETRIES = 2
-        for attempt in range(MAX_RETRIES):
-            try:
-                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                params = BalanceAllowanceParams(
-                    asset_type=AssetType.CONDITIONAL,
-                    token_id=token_id,
-                    signature_type=self._sig_type,
-                )
-                # Ask CLOB to refresh its cached on-chain state
-                self.clob_client.update_balance_allowance(params)
-                await asyncio.sleep(1.5)  # Give CLOB time to re-index on-chain state
-
-                # ── Verify: read back and check actual values ──
-                try:
-                    bal_resp = self.clob_client.get_balance_allowance(params)
-                    if bal_resp:
-                        balance_raw = float(bal_resp.get('balance', 0))
-                        allowance_raw = float(bal_resp.get('allowance', 0))
-                        # Polymarket uses 1e6 decimals
-                        balance = balance_raw / 1e6 if balance_raw > 1_000_000 else balance_raw
-                        allowance = allowance_raw / 1e6 if allowance_raw > 1_000_000 else allowance_raw
-
-                        print(f"🔍 Token check: balance={balance:.4f} "
-                              f"allowance={'MAX' if allowance > 1e12 else f'{allowance:.4f}'} "
-                              f"(attempt {attempt+1})", flush=True)
-
-                        if balance <= 0:
-                            print(f"⚠️ CLOB says token balance=0 — tokens may not be indexed yet", flush=True)
-                            if attempt < MAX_RETRIES - 1:
-                                wait = 3.0 * (attempt + 1)
-                                print(f"   Waiting {wait:.0f}s for on-chain indexing...", flush=True)
-                                await asyncio.sleep(wait)
-                                continue
-                            return False  # Balance=0 is a real blocker
-
-                        if allowance <= 0:
-                            # WARNING ONLY — don't block the sell!
-                            # On-chain approval was verified at startup.
-                            # CLOB cache may be stale. Try selling anyway.
-                            print(f"⚠️ CLOB reports allowance=0 (may be stale cache) — "
-                                  f"will attempt sell anyway", flush=True)
-                            return True  # Let the sell attempt proceed
-
-                except Exception as check_err:
-                    print(f"⚠️ get_balance_allowance failed (non-fatal): {check_err}", flush=True)
-
-                if attempt > 0:
-                    print(f"✅ Conditional allowance verified (attempt {attempt+1})", flush=True)
-                return True
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    print(f"⚠️ Allowance attempt {attempt+1} failed: {e} — retrying...", flush=True)
-                    await asyncio.sleep(1)
-                else:
-                    # Don't block on allowance check failure — try selling anyway
-                    print(f"⚠️ Allowance check failed: {e} — will attempt sell anyway", flush=True)
-                    return True
-        return True  # Default: let the sell attempt proceed
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=self._sig_type,
+            )
+            self.clob_client.update_balance_allowance(params)
+        except Exception as e:
+            print(f"⚠️ update_balance_allowance non-fatal: {e}", flush=True)
+        return True
 
     async def _close_position(self, trade_id: str, exit_price: float,
                               pnl: float, reason: str) -> bool:
@@ -1408,14 +1356,8 @@ class LiveTrader:
             # Tick-align exit price
             sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
 
-            # ── Refresh & verify conditional token allowance ──
-            allowance_ok = await self._ensure_conditional_allowance(pos['token_id'])
-            if not allowance_ok:
-                pos['_sell_fails'] = sell_fails + 1
-                remaining = MAX_SELL_RETRIES - pos['_sell_fails']
-                print(f"⛔ Skipping sell — allowance/balance check failed "
-                      f"({remaining} retries left)", flush=True)
-                return False
+            # ── Refresh conditional token allowance (fire-and-forget) ──
+            await self._ensure_conditional_allowance(pos['token_id'])
 
             # ═══ Attempt 1: FOK sell (instant exit) ═══
             print(f"📤 [FOK] SELL: {pos['coin']} {pos['direction']} | "
@@ -1501,43 +1443,25 @@ class LiveTrader:
                 except Exception as retry_e:
                     print(f"❌ Min-size retry also failed: {retry_e}", flush=True)
 
-            # ── Handle balance/allowance errors ──
+            # ── Handle balance/allowance errors: retry with 95% shares ──
+            # CLOB sometimes reports fewer shares than we have (rounding).
+            # A 95% reduced FOK often succeeds when the full amount fails.
             if 'not enough balance' in error_str or 'allowance' in error_str:
-                print(f"🔄 Balance/allowance error — attempting on-chain approval fix...", flush=True)
-                try:
-                    import asyncio
-                    # Try on-chain setApprovalForAll via auto_redeemer (if available)
-                    engine = getattr(self, '_engine', None)
-                    if engine and hasattr(engine, 'auto_redeemer') and engine.auto_redeemer:
-                        print(f"🔑 Sending setApprovalForAll on-chain...", flush=True)
-                        await engine.auto_redeemer.ensure_ctf_approval()
-                        await asyncio.sleep(3)  # Wait for on-chain confirmation
-                    
-                    # Refresh CLOB's cached state
-                    await self._ensure_conditional_allowance(pos['token_id'])
-                    await asyncio.sleep(1)
-                    # Try FOK with reduced shares (balance rounding issue)
-                    reduced = math.floor(sell_shares_fok * 0.95 * 100) / 100
-                    if reduced < 0.01:
-                        reduced = sell_shares_fok
-                    print(f"🔄 Retrying FOK sell with {reduced} shares...", flush=True)
-                    retry_resp = await self._submit_order(
-                        pos['token_id'], sell_price, reduced, SELL, OrderType.FOK
-                    )
-                    if retry_resp and retry_resp.get('status') != 'error':
-                        print(f"✅ Retry sell succeeded after on-chain approval fix!", flush=True)
-                        self._finalize_close(trade_id, exit_price, pnl, reason)
-                        return True
-                except Exception as retry_e:
-                    print(f"❌ Retry after approval fix also failed: {retry_e}", flush=True)
+                reduced = math.floor(sell_shares_fok * 0.95 * 100) / 100
+                if reduced >= 0.01:
+                    print(f"🔄 Balance/allowance error — retrying FOK with {reduced} shares (95%)...", flush=True)
+                    try:
+                        retry_resp = await self._submit_order(
+                            pos['token_id'], sell_price, reduced, SELL, OrderType.FOK
+                        )
+                        if retry_resp and retry_resp.get('status') != 'error':
+                            print(f"✅ Reduced-share sell succeeded!", flush=True)
+                            self._finalize_close(trade_id, exit_price, pnl, reason)
+                            return True
+                    except Exception as retry_e:
+                        print(f"❌ Reduced-share retry also failed: {retry_e}", flush=True)
 
-                pos['_sell_fails'] = sell_fails + 1
-                remaining = MAX_SELL_RETRIES - pos['_sell_fails']
-                print(f"❌ Sell error (balance/allowance): {e} "
-                      f"({remaining} retries left)", flush=True)
-                return False
-
-            # General sell error — still count it
+            # General sell error — count it and move on
             pos['_sell_fails'] = sell_fails + 1
             print(f"❌ Sell error: {e} ({MAX_SELL_RETRIES - pos['_sell_fails']} retries left)", flush=True)
 

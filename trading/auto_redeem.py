@@ -197,6 +197,28 @@ class AutoRedeemer:
         self._last_check = now
 
         try:
+            # ── Pre-flight: check EOA has enough MATIC for gas ──
+            # Each redeem tx costs ~0.05-0.13 MATIC. If balance is too low,
+            # skip ALL redeems to avoid spamming "insufficient funds" errors.
+            try:
+                from web3 import Web3
+                rpc_url = self._rpc_urls[0] if self._rpc_urls else None
+                if rpc_url:
+                    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
+                    from eth_account import Account
+                    acct = Account.from_key(self._private_key)
+                    matic_balance = w3.eth.get_balance(acct.address)
+                    matic_eth = matic_balance / 1e18
+                    if matic_eth < 0.05:
+                        # Only log once per hour to avoid spam
+                        if not hasattr(self, '_last_gas_warning') or (now - self._last_gas_warning > 3600):
+                            print(f"⛽ EOA MATIC balance too low for redeems: {matic_eth:.4f} MATIC "
+                                  f"(need ~0.05+). Send MATIC to {acct.address}", flush=True)
+                            self._last_gas_warning = now
+                        return {"redeemed": 0, "total_redeemed_usd": 0, "skip_reason": "low_gas"}
+            except Exception as gas_err:
+                print(f"⚠️ Gas balance check failed (non-fatal): {gas_err}", flush=True)
+
             positions = await self._get_conditional_positions()
             if not positions:
                 return {"redeemed": 0, "total_redeemed_usd": 0}
@@ -246,6 +268,12 @@ class AutoRedeemer:
                 else:
                     failed += 1
                     print(f"⚠️ Redeem failed: {condition_id[:16]}...", flush=True)
+                    # Stop trying more redeems if gas/nonce issues
+                    # (avoids queuing 5 failing txs when MATIC is low)
+                    if failed >= 1:
+                        print(f"  ⛔ Stopping redeem batch after first failure "
+                              f"(prevents tx queue buildup)", flush=True)
+                        break
 
                 # Wait between redeems so nonce clears on-chain
                 await asyncio.sleep(5)
@@ -435,6 +463,10 @@ class AutoRedeemer:
 
         Signs an EIP-712 Safe transaction and submits on-chain.
         Costs ~0.004 POL gas.  Used for redeem, setApprovalForAll, etc.
+        
+        Pre-checks:
+        - EOA has enough MATIC (estimated gas cost + 20% margin)
+        - No pending txs in mempool (waits or skips)
         """
         if not self._w3:
             return False
@@ -446,6 +478,34 @@ class AutoRedeemer:
             w3 = self._w3
             safe_addr = Web3.to_checksum_address(self._proxy_wallet)
             target = Web3.to_checksum_address(target)
+            acct = Account.from_key(self._private_key)
+
+            # ── Pre-flight: check for pending txs ──
+            confirmed_nonce = w3.eth.get_transaction_count(acct.address, 'latest')
+            pending_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
+            pending_count = pending_nonce - confirmed_nonce
+            if pending_count > 0:
+                print(f"  ⏳ {pending_count} pending tx(s) in mempool — waiting 15s...", flush=True)
+                await asyncio.sleep(15)
+                # Re-check after waiting
+                confirmed_nonce = w3.eth.get_transaction_count(acct.address, 'latest')
+                pending_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
+                if pending_nonce - confirmed_nonce > 0:
+                    print(f"  ⛔ Still {pending_nonce - confirmed_nonce} pending tx(s) — "
+                          f"skipping to avoid queue buildup", flush=True)
+                    return False
+
+            # ── Pre-flight: check MATIC balance vs estimated cost ──
+            gas_price = w3.eth.gas_price
+            max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
+            estimated_cost = gas_limit * max_fee
+            matic_balance = w3.eth.get_balance(acct.address)
+            if matic_balance < estimated_cost * 12 // 10:  # Need 120% of estimate
+                matic_eth = matic_balance / 1e18
+                cost_eth = estimated_cost / 1e18
+                print(f"  ⛽ Insufficient MATIC: {matic_eth:.4f} POL < "
+                      f"{cost_eth:.4f} POL needed. Send MATIC to {acct.address}", flush=True)
+                return False
 
             # ── Get Safe nonce ──
             nonce = await self._get_safe_nonce(safe_addr)
@@ -461,7 +521,6 @@ class AutoRedeemer:
             )
 
             # ── ECDSA sign ──
-            acct = Account.from_key(self._private_key)
             signed = acct.unsafe_sign_hash(safe_tx_hash)
             sig_bytes = (signed.r.to_bytes(32, 'big') +
                          signed.s.to_bytes(32, 'big') +
@@ -486,13 +545,8 @@ class AutoRedeemer:
             }]
 
             safe = w3.eth.contract(address=safe_addr, abi=exec_abi)
-            gas_price = w3.eth.gas_price
-            max_fee = max(gas_price * 2, w3.to_wei(35, 'gwei'))
             priority_fee = min(w3.to_wei(30, 'gwei'), max_fee - 1)
-
-            # Use 'pending' nonce to avoid "replacement transaction underpriced"
-            # when a previous tx is still in the mempool
-            eoa_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
+            eoa_nonce = confirmed_nonce  # Use confirmed nonce (no pending txs at this point)
 
             tx_data = safe.functions.execTransaction(
                 target, 0, inner_data, 0,
@@ -507,21 +561,7 @@ class AutoRedeemer:
             })
 
             signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
-            try:
-                tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            except Exception as send_err:
-                err_msg = str(send_err).lower()
-                if 'replacement' in err_msg or 'underpriced' in err_msg or 'nonce' in err_msg:
-                    print(f"  ⏳ Nonce conflict, waiting for pending tx to clear...",
-                          flush=True)
-                    await asyncio.sleep(15)
-                    # Retry with fresh nonce
-                    new_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
-                    tx_data['nonce'] = new_nonce
-                    signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
-                    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-                else:
-                    raise
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
             print(f"  📨 {label}: {tx_hash.hex()}", flush=True)
 

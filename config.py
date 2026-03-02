@@ -118,7 +118,7 @@ class Config:
             'take_profit_pct': 200.0,   # Dynamic exit, not % based
             'stop_loss_pct': 16.0,      # Cut at 16%
             'min_confidence': 0.40,     # Low bar — trade often
-            'preferred_strategies': ['cheap_hunter', 'momentum_reversal', 'prob_closer'],
+            'preferred_strategies': ['time_decay', 'expiry_rush', 'binance_momentum'],
         },
         15: {
             'name': '15 min',
@@ -128,7 +128,7 @@ class Config:
             'take_profit_pct': 200.0,
             'stop_loss_pct': 16.0,
             'min_confidence': 0.40,
-            'preferred_strategies': ['cheap_hunter', 'oracle_arb', 'yes_no_arb'],
+            'preferred_strategies': ['time_decay', 'yes_no_arb', 'cross_tf_arb'],
         },
         30: {
             'name': '30 min',
@@ -138,7 +138,7 @@ class Config:
             'take_profit_pct': 200.0,
             'stop_loss_pct': 16.0,
             'min_confidence': 0.40,
-            'preferred_strategies': ['cheap_hunter', 'time_decay', 'oracle_arb'],
+            'preferred_strategies': ['time_decay', 'binance_momentum', 'oracle_arb'],
         },
     }
 
