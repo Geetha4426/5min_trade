@@ -257,15 +257,28 @@ class AutoRedeemer:
                 print(f"💰 Auto-redeem: {title[:50]}... "
                       f"({balance:.2f} tokens, neg_risk={neg_risk})", flush=True)
 
+                # Check USDC before redeem to measure actual payout
+                usdc_before = self._get_usdc_balance() if self._w3 else 0
+
                 ok = await self._redeem(condition_id, neg_risk)
                 if ok:
                     self._redeemed_conditions.add(condition_id)
                     redeemed += 1
                     self._total_redeemed += 1
-                    total_usd += balance
-                    self._total_usd_recovered += balance
-                    print(f"✅ Redeemed! Session total: {self._total_redeemed} "
-                          f"(~${self._total_usd_recovered:.2f})", flush=True)
+
+                    # Measure actual USDC gained (not token count)
+                    usdc_after = self._get_usdc_balance() if self._w3 else 0
+                    actual_payout = max(0, usdc_after - usdc_before)
+                    total_usd += actual_payout
+                    self._total_usd_recovered += actual_payout
+
+                    if actual_payout > 0.01:
+                        print(f"✅ Redeemed +${actual_payout:.2f} USDC! "
+                              f"Session total: {self._total_redeemed} "
+                              f"(${self._total_usd_recovered:.2f})", flush=True)
+                    else:
+                        print(f"✅ Redeemed (losing side — $0 payout). "
+                              f"Session total: {self._total_redeemed}", flush=True)
                 else:
                     failed += 1
                     print(f"⚠️ Redeem failed: {condition_id[:16]}...", flush=True)
@@ -290,7 +303,11 @@ class AutoRedeemer:
     # ─── Position discovery ───────────────────────────────────────────
 
     async def _get_conditional_positions(self) -> Dict[str, float]:
-        """Find all conditional token positions on the wallet."""
+        """Find all conditional token positions on the wallet.
+
+        Queries BOTH Gamma API and data-api, merges results.
+        Uses pagination to avoid missing positions.
+        """
         try:
             import requests
 
@@ -300,27 +317,39 @@ class AutoRedeemer:
 
             positions = {}
 
-            # Gamma API
+            # ── Source 1: Gamma API (with pagination) ──
             try:
-                resp = requests.get(
-                    f"{GAMMA_API_URL}/positions",
-                    params={"user": address.lower()},
-                    timeout=15,
-                )
-                if resp.status_code == 200:
+                offset = 0
+                page_size = 100
+                while True:
+                    resp = requests.get(
+                        f"{GAMMA_API_URL}/positions",
+                        params={
+                            "user": address.lower(),
+                            "limit": page_size,
+                            "offset": offset,
+                        },
+                        timeout=15,
+                    )
+                    if resp.status_code != 200:
+                        break
                     data = resp.json()
-                    if isinstance(data, list):
-                        for pos in data:
-                            token_id = pos.get("asset", pos.get("token_id", ""))
-                            size = float(pos.get("size", pos.get("balance", 0)))
-                            if token_id and size > 0:
-                                positions[token_id] = size
-                    if positions:
-                        return positions
-            except Exception:
-                pass
+                    if not isinstance(data, list) or not data:
+                        break
+                    for pos in data:
+                        token_id = pos.get("asset", pos.get("token_id", ""))
+                        size = float(pos.get("size", pos.get("balance", 0)))
+                        if token_id and size > 0:
+                            positions[token_id] = max(
+                                positions.get(token_id, 0), size
+                            )
+                    if len(data) < page_size:
+                        break
+                    offset += page_size
+            except Exception as e:
+                print(f"  ⚠️ Gamma positions query: {e}", flush=True)
 
-            # Fallback: data-api
+            # ── Source 2: data-api (merge, don't replace) ──
             try:
                 resp = requests.get(
                     "https://data-api.polymarket.com/positions",
@@ -334,9 +363,15 @@ class AutoRedeemer:
                             token_id = pos.get("asset", pos.get("token_id", ""))
                             size = float(pos.get("size", pos.get("balance", 0)))
                             if token_id and size > 0:
-                                positions[token_id] = size
-            except Exception:
-                pass
+                                positions[token_id] = max(
+                                    positions.get(token_id, 0), size
+                                )
+            except Exception as e:
+                print(f"  ⚠️ data-api positions query: {e}", flush=True)
+
+            if positions:
+                print(f"  📋 Found {len(positions)} positions with tokens",
+                      flush=True)
 
             return positions
 
@@ -773,6 +808,25 @@ class AutoRedeemer:
         return await self._execute_via_safe(
             target_str, inner_data, gas_limit=300_000, label="Redeem"
         )
+
+    def _get_usdc_balance(self) -> float:
+        """Read USDC.e balance of proxy wallet (or EOA). Returns dollar amount."""
+        try:
+            from web3 import Web3
+            w3 = self._w3
+            owner = self._proxy_wallet or self._signer_address
+            if not owner or not w3:
+                return 0.0
+            # balanceOf(address) selector = 0x70a08231
+            owner_hex = owner.lower().replace('0x', '').zfill(64)
+            result = w3.eth.call({
+                'to': Web3.to_checksum_address(USDC_ADDRESS),
+                'data': f'0x70a08231{owner_hex}',
+            })
+            raw = int.from_bytes(result, 'big')
+            return raw / 1e6  # USDC has 6 decimals
+        except Exception:
+            return 0.0
 
     async def _get_safe_nonce(self, safe_addr: str) -> Optional[int]:
         """Read the current nonce from the Gnosis Safe contract."""
