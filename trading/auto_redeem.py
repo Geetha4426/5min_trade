@@ -201,13 +201,10 @@ class AutoRedeemer:
             # Each redeem tx costs ~0.05-0.13 MATIC. If balance is too low,
             # skip ALL redeems to avoid spamming "insufficient funds" errors.
             try:
-                from web3 import Web3
-                rpc_url = self._rpc_urls[0] if self._rpc_urls else None
-                if rpc_url:
-                    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
+                if self._w3:
                     from eth_account import Account
                     acct = Account.from_key(self._private_key)
-                    matic_balance = w3.eth.get_balance(acct.address)
+                    matic_balance = self._w3.eth.get_balance(acct.address)
                     matic_eth = matic_balance / 1e18
                     if matic_eth < 0.05:
                         # Only log once per hour to avoid spam
