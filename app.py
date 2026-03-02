@@ -162,11 +162,11 @@ class TradingEngine:
         try:
             await asyncio.sleep(3)
             if self.auto_redeemer:
-                print("🔑 Force-sending CTF exchange approvals on-chain...", flush=True)
-                # Always force-send setApprovalForAll (idempotent, ~$0.001 gas)
-                # The on-chain isApprovedForAll check can disagree with the CLOB API,
-                # so we force-approve every startup to be safe.
-                await self.auto_redeemer.ensure_ctf_approval(force=True)
+                print("🔑 Checking CTF exchange approvals on-chain...", flush=True)
+                # Check on-chain first — only send tx if NOT approved.
+                # Force=True was burning gas on every restart/deploy, creating
+                # queued txs that ate the entire MATIC balance.
+                await self.auto_redeemer.ensure_ctf_approval(force=False)
         except Exception as e:
             print(f"⚠️ Startup approval failed: {e}", flush=True)
 

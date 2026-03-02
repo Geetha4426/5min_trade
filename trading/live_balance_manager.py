@@ -49,9 +49,9 @@ LIVE_MODES = {
         reserve_pct=15.0,       # Keep 15% as buffer for sell fees/emergencies
         reserve_min=0.50,       # Always keep $0.50 minimum reserve
         max_pos_per_dollar=1.0, # 1 position per $1
-        max_positions_cap=1,    # ONE position at a time — never spread $4 thin
+        max_positions_cap=2,    # 2 positions — allows arb pairs (UP+DOWN)
         min_confidence=0.90,    # Very high bar — only near-certain trades fire
-        description='$1-5 start — 1 position, 0.90 confidence, safe growth',
+        description='$1-5 start — 2 positions, 0.90 confidence, safe growth',
     ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
@@ -353,11 +353,15 @@ class LiveBalanceManager:
         - cheap_hunter / penny_sniper: lottery bets that can wipe out $1-5
         - prob_closer: pays $0.90-0.95 for 5-10% discount — one loss = -40% of
           SEED balance.  Terrible risk/reward at <$5.
+        - oracle_arb: confidence is artificially capped at 0.90 (exactly SEED
+          threshold), so it always passes.  But it lacks Binance cross-validation
+          and repeatedly bought the wrong direction in live testing (3 consecutive
+          stop-losses in 60 seconds, -$1.17).  Only allow in CONCENTRATION+.
         """
         disabled = []
         if self.mode_name == 'seed':
             # SEED = capital preservation. Block strategies with bad risk/reward.
-            disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer']
+            disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer', 'oracle_arb']
 
         return {
             'enabled': 'all',

@@ -60,6 +60,10 @@ class LiveTrader:
         self._cached_real_balance: Optional[float] = None
         self._last_balance_check: float = 0.0
         self._sig_type: int = 0  # 0=EOA, 1=Magic, 2=Proxy
+        # ── Cooldown: prevent re-entry after stop-loss ──
+        # Maps "COIN_DIRECTION" -> timestamp of last stop-loss exit
+        self._stop_loss_cooldowns: Dict[str, float] = {}
+        self.STOP_LOSS_COOLDOWN_SECS = 60  # Block same coin+direction for 60s after stop
 
     async def init(self):
         """Initialize CLOB client with credentials.
@@ -615,6 +619,31 @@ class LiveTrader:
                 print(f"⛔ Can't trade: {reason} | Balance: ${self.balance_mgr.balance:.2f} | "
                       f"Signal: {signal.coin} {signal.direction} @ {signal.entry_price:.3f}", flush=True)
             return None
+
+        # ── Cooldown: block re-entry on same coin+direction after stop-loss ──
+        # Only in SEED/CONCENTRATION to protect capital. MEDIUM/AGGRESSIVE trade freely.
+        mode = self.balance_mgr.mode_name
+        if mode in ('seed', 'concentration'):
+            cooldown_key = f"{signal.coin}_{signal.direction}"
+            last_stop = self._stop_loss_cooldowns.get(cooldown_key, 0)
+            cooldown_secs = self.STOP_LOSS_COOLDOWN_SECS
+            if time.time() - last_stop < cooldown_secs:
+                remaining = cooldown_secs - (time.time() - last_stop)
+                now = time.time()
+                if not hasattr(self, '_last_cooldown_log') or now - self._last_cooldown_log > 10:
+                    self._last_cooldown_log = now
+                    print(f"🧊 Cooldown: {signal.coin} {signal.direction} blocked "
+                          f"({remaining:.0f}s after stop-loss)", flush=True)
+                return None
+
+        # ── Conflict check: don't enter same coin in opposite direction ──
+        # Prevents: buying SOL UP while holding SOL DOWN (different timeframes)
+        # Only in SEED/CONCENTRATION. MEDIUM/AGGRESSIVE can multi-position same coin.
+        # EXCEPTION: BOTH-side arb signals are always allowed (they hedge).
+        if mode in ('seed', 'concentration') and signal.direction != 'BOTH':
+            for pos in self.positions.values():
+                if pos.get('coin') == signal.coin and pos.get('direction') != signal.direction:
+                    return None  # Opposite direction conflict
 
         size = self.balance_mgr.get_position_size(signal.confidence)
         if size < Config.POLYMARKET_MIN_ORDER_SIZE:
@@ -1181,7 +1210,10 @@ class LiveTrader:
 
             # Use per-position fee rate (not global which gets overwritten per-trade)
             pos_fee_rate = pos.get('fee_rate', self.TAKER_FEE_RATE)
-            decision = self._exit_decision(pos['entry_price'], current_price, secs, pos_fee_rate)
+            decision = self._exit_decision(
+                pos['entry_price'], current_price, secs, pos_fee_rate,
+                strategy=pos.get('strategy', ''), pos=pos
+            )
 
             if decision in ('sell', 'cut_loss'):
                 pnl = (current_price - pos['entry_price']) * pos.get('shares', 0)
@@ -1193,17 +1225,22 @@ class LiveTrader:
         return closed
 
     def _exit_decision(self, entry_price: float, current_price: float,
-                       seconds_remaining: int, fee_rate: float = None) -> str:
+                       seconds_remaining: int, fee_rate: float = None,
+                       strategy: str = '', pos: dict = None) -> str:
         """Dynamic exit decision for 5-minute binary markets.
         
         These markets resolve to $1 (win) or $0 (lose). Prices are probabilities.
         
-        Strategy:
+        Stop-loss is DYNAMIC based on:
+          - Strategy: time_decay/expiry_rush near expiry get wider stops
+          - Entry price: cheap entries get very wide stops (lottery math)
+          - Time remaining: <30s → NO stop, let it settle to $1 or $0
+          - Mode: AGGRESSIVE gets 2x wider stops, SEED gets base
+        
+        Profit-taking:
           - High-probability entries (>0.80): Hold for settlement ($1 payout)
-            unless price reverses significantly → then cut loss
-          - Mid-probability entries: Use trailing profit targets + time-decay
-          - Near expiry: If profitable net of fees, take it. If losing, cut.
-          - Always cut if loss exceeds mode threshold to protect capital.
+          - Mid entries: Dynamic targets based on time remaining
+          - Cheap entries: Hold for 2.5x+ multiples
         """
         if entry_price <= 0:
             return 'hold'
@@ -1222,11 +1259,49 @@ class LiveTrader:
 
         mode = self.balance_mgr.mode_name
 
-        # ── Mode-specific stop-loss thresholds (tighter = safer) ──
-        stop_loss = {'seed': -10, 'concentration': -15, 'medium': -20, 'aggressive': -25}
-        max_loss = stop_loss.get(mode, -15)
+        # ══════════════════════════════════════════════════════════
+        # DYNAMIC STOP-LOSS — adapts to strategy, price, time, mode
+        # ══════════════════════════════════════════════════════════
 
-        # ── Hard stop loss — always respect ──
+        # 1. Near expiry (<30s) → NEVER stop out. Market settles in seconds.
+        #    Selling into thin liquidity near expiry guarantees slippage.
+        #    Better to let it resolve to $1 (win) or $0 (lose).
+        if seconds_remaining < 30 and pnl_pct < 0:
+            return 'hold'  # Let it settle — don't panic sell
+
+        # 2. Base stop by entry price tier (higher entry = tighter stop)
+        if entry_price < 0.15:
+            base_stop = -60   # Pennies: let them ride, lottery math
+        elif entry_price < 0.30:
+            base_stop = -40   # Cheap: wide stop, expected to be volatile
+        elif entry_price < 0.50:
+            base_stop = -25   # Mid-range: moderate room
+        elif entry_price < 0.70:
+            base_stop = -18   # Higher probability: tighter
+        elif entry_price < 0.85:
+            base_stop = -12   # High prob: fairly tight
+        else:
+            base_stop = -8    # Near-certain: very tight
+
+        # 3. Strategy-specific override (some strategies need wider stops)
+        strategy = strategy or (pos.get('strategy', '') if pos else '')
+        if strategy in ('time_decay', 'expiry_rush'):
+            # These bet on settlement direction — they NEED to survive to expiry
+            base_stop = min(base_stop, -35)  # At least -35%, never tighter
+        elif strategy == 'early_mover':
+            base_stop = min(base_stop, -30)  # Cheap reversals need room
+
+        # 4. Mode multiplier (AGGRESSIVE gets widest stops, SEED gets base)
+        mode_mult = {'seed': 1.0, 'concentration': 1.2, 'medium': 1.5, 'aggressive': 2.0}
+        max_loss = base_stop * mode_mult.get(mode, 1.0)
+
+        # 5. Time-based widening: more time left → wider stop (can recover)
+        if seconds_remaining > 120:
+            max_loss *= 1.3   # 2+ min left: 30% wider
+        elif seconds_remaining > 60:
+            max_loss *= 1.15  # 1-2 min left: 15% wider
+
+        # ── Hard stop loss — respect the dynamic threshold ──
         if pnl_pct <= max_loss:
             return 'cut_loss'
 
@@ -1483,6 +1558,11 @@ class LiveTrader:
 
         # Always free the position slot
         self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+
+        # ── Record stop-loss cooldown to prevent immediate re-entry ──
+        if reason in ('stop_loss', 'sell_failed_settle'):
+            cooldown_key = f"{pos.get('coin', '')}_{pos.get('direction', '')}"
+            self._stop_loss_cooldowns[cooldown_key] = time.time()
 
         # ── sell_failed_settle: tokens unredeemed, don't inflate balance ──
         if reason == 'sell_failed_settle':
