@@ -216,6 +216,23 @@ class DynamicPicker(BaseStrategy):
         best = signals[0]
         best.metadata['alternatives'] = len(signals) - 1
         best.metadata['strategies_checked'] = len(self.strategies)
+
+        # ── Add spread info for spread guard in execute_signal ──
+        # If the strategy didn't compute spread, fetch orderbook here.
+        if 'spread_pct' not in best.metadata and context.get('clob'):
+            try:
+                token_id = best.token_id
+                if '|' not in token_id:  # Skip BOTH-side signals
+                    book = context['clob'].get_orderbook(token_id)
+                    if book:
+                        bid = book.get('best_bid', 0)
+                        ask = book.get('best_ask', 0)
+                        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
+                        if mid > 0:
+                            best.metadata['spread_pct'] = (ask - bid) / mid * 100
+            except Exception:
+                pass
+
         return best
 
     def get_suitable_timeframes(self) -> List[int]:

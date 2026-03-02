@@ -470,7 +470,7 @@ def get_full_signal_analysis(
         confidence *= 1.1  # Bonus for strong agreement
 
     # Cap confidence
-    confidence = max(0.0, min(0.90, confidence))
+    confidence = max(0.0, min(0.95, confidence))
 
     # Entry recommendation
     entry_recommended = (

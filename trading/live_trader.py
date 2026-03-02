@@ -64,6 +64,12 @@ class LiveTrader:
         # Maps "COIN_DIRECTION" -> timestamp of last stop-loss exit
         self._stop_loss_cooldowns: Dict[str, float] = {}
         self.STOP_LOSS_COOLDOWN_SECS = 60  # Block same coin+direction for 60s after stop
+        # ── Signal dedup: suppress repeated identical signals ──
+        self._signal_dedup: Dict[str, float] = {}
+        self.SIGNAL_DEDUP_SECS = 10  # Suppress same coin+dir+strategy within 10s
+        # ── Global post-loss throttle: brief pause after ANY stop-loss ──
+        self._last_stop_loss_time: float = 0
+        self.POST_LOSS_THROTTLE_SECS = 5  # 5s pause — just prevents 3s revenge trades
 
     async def init(self):
         """Initialize CLOB client with credentials.
@@ -644,6 +650,36 @@ class LiveTrader:
             for pos in self.positions.values():
                 if pos.get('coin') == signal.coin and pos.get('direction') != signal.direction:
                     return None  # Opposite direction conflict
+
+        # ── Global post-loss throttle: brief pause after ANY stop-loss ──
+        # Prevents revenge trading across all coins after a loss.
+        # SEED/CONCENTRATION only — higher modes trade freely.
+        if mode in ('seed', 'concentration') and self._last_stop_loss_time > 0:
+            since_last = time.time() - self._last_stop_loss_time
+            if since_last < self.POST_LOSS_THROTTLE_SECS:
+                return None
+
+        # ── Signal dedup: suppress repeated signals for same coin+direction+strategy ──
+        # Problem: oracle_arb fired 14 BTC UP signals in 60 seconds, all identical.
+        # Different from cooldown (which is per stop-loss). This blocks signal spam.
+        dedup_key = f"{signal.coin}_{signal.direction}_{signal.strategy}"
+        last_fired = self._signal_dedup.get(dedup_key, 0)
+        dedup_window = self.SIGNAL_DEDUP_SECS if mode in ('seed', 'concentration') else 3
+        if time.time() - last_fired < dedup_window:
+            return None
+        self._signal_dedup[dedup_key] = time.time()
+
+        # ── Spread guard: reject entries with wide bid-ask spreads ──
+        # Wide spread = instant paper loss that often exceeds the potential gain.
+        # In thin 5-minute markets, 5%+ spreads are common and deadly.
+        spread_pct = (signal.metadata or {}).get('spread_pct', 0)
+        max_spread = 6.0 if mode in ('seed', 'concentration') else 10.0
+        if spread_pct > max_spread:
+            now_t = time.time()
+            if not hasattr(self, '_last_spread_log') or now_t - self._last_spread_log > 15:
+                self._last_spread_log = now_t
+                print(f"⚠️ Skip: {signal.coin} spread {spread_pct:.1f}% > {max_spread:.0f}%", flush=True)
+            return None
 
         size = self.balance_mgr.get_position_size(signal.confidence)
         if size < Config.POLYMARKET_MIN_ORDER_SIZE:
@@ -1431,15 +1467,23 @@ class LiveTrader:
             # Tick-align exit price
             sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
 
+            # ── Cross the spread: aggressive FOK sell pricing ──
+            # In thin 5m markets, FOK at exact price has ~20% fill rate.
+            # Lowering the limit price 1-2¢ widens the set of matching bids.
+            # Exchange fills at BEST available bid, so actual fill ≥ our limit.
+            sell_discount = min(0.02, max(0.01, round(sell_price * 0.03 * 100) / 100))
+            sell_price_aggressive = max(0.01, sell_price - sell_discount)
+
             # ── Refresh conditional token allowance (fire-and-forget) ──
             await self._ensure_conditional_allowance(pos['token_id'])
 
-            # ═══ Attempt 1: FOK sell (instant exit) ═══
+            # ═══ Attempt 1: FOK sell with spread-crossing price ═══
             print(f"📤 [FOK] SELL: {pos['coin']} {pos['direction']} | "
-                  f"{sell_shares_fok} shares @ ${sell_price:.3f} [{reason}] "
+                  f"{sell_shares_fok} shares @ ${sell_price_aggressive:.3f} "
+                  f"(cross spread, base ${sell_price:.3f}) [{reason}] "
                   f"(attempt {sell_fails + 1}/{MAX_SELL_RETRIES})", flush=True)
 
-            resp = await self._submit_order(pos['token_id'], sell_price, sell_shares_fok, SELL, OrderType.FOK)
+            resp = await self._submit_order(pos['token_id'], sell_price_aggressive, sell_shares_fok, SELL, OrderType.FOK)
 
             if resp and resp.get('status') != 'error':
                 print(f"✅ [FOK] SELL FILLED instantly", flush=True)
@@ -1450,7 +1494,7 @@ class LiveTrader:
             reduced_shares = math.floor(sell_shares_fok * 0.95 * 100) / 100
             if reduced_shares >= 0.01 and reduced_shares != sell_shares_fok:
                 print(f"⚠️ FOK full failed — retrying with {reduced_shares} shares (95%)", flush=True)
-                resp_reduced = await self._submit_order(pos['token_id'], sell_price, reduced_shares, SELL, OrderType.FOK)
+                resp_reduced = await self._submit_order(pos['token_id'], sell_price_aggressive, reduced_shares, SELL, OrderType.FOK)
                 if resp_reduced and resp_reduced.get('status') != 'error':
                     print(f"✅ [FOK] SELL FILLED with reduced shares", flush=True)
                     self._finalize_close(trade_id, exit_price, pnl, reason)
@@ -1563,6 +1607,8 @@ class LiveTrader:
         if reason in ('stop_loss', 'sell_failed_settle'):
             cooldown_key = f"{pos.get('coin', '')}_{pos.get('direction', '')}"
             self._stop_loss_cooldowns[cooldown_key] = time.time()
+            # Global post-loss throttle: brief pause on ALL trades after stop
+            self._last_stop_loss_time = time.time()
 
         # ── sell_failed_settle: tokens unredeemed, don't inflate balance ──
         if reason == 'sell_failed_settle':

@@ -16,7 +16,7 @@ Position count is dynamic based on balance.
 """
 
 import time
-from typing import Dict
+from typing import Dict, Optional
 from config import Config
 
 
@@ -139,6 +139,12 @@ class LiveBalanceManager:
         # When True, relaxes position limits (up to 10) and forces $1 bets
         self.cheap_hunter_mode = False
 
+        # ── Session loss circuit breaker (SEED mode) ──
+        # Pauses trading for 5 min if >40% session loss. Only in SEED: tiny
+        # capital can evaporate in seconds without a breaker.
+        self._session_start_balance: Optional[float] = None
+        self._session_paused_until: float = 0
+
     def set_mode(self, mode: str):
         """Switch risk mode."""
         mode = mode.lower()
@@ -191,6 +197,9 @@ class LiveBalanceManager:
         self._size_multiplier = 1.0
         self._consecutive_losses = 0
         self._consecutive_wins = 0
+        # Reset session breaker
+        self._session_start_balance = self.balance
+        self._session_paused_until = 0
         return f"✅ Tracking reset. Peak=${self.balance:.2f}, sizing=1.00×"
 
     @property
@@ -235,6 +244,31 @@ class LiveBalanceManager:
 
     def can_trade(self) -> tuple:
         """Check if we can open a new position. Drawdown is alert-only, never blocks."""
+        # ── Session loss circuit breaker (SEED only) ──
+        # If we've lost >40% of session starting balance, pause 5 min.
+        # Prevents: $4.98 → $2.38 (52% drawdown) in 90 seconds with no pause.
+        if self.mode_name == 'seed':
+            if self._session_start_balance is None:
+                self._session_start_balance = self.balance
+            if self._session_start_balance > 0:
+                session_loss_pct = (1 - self.balance / self._session_start_balance) * 100
+                if session_loss_pct >= 40:
+                    now = time.time()
+                    if self._session_paused_until == 0:
+                        self._session_paused_until = now + 300  # 5 min pause
+                        print(f"\n{'='*60}", flush=True)
+                        print(f"🚨 SESSION BREAKER: -{session_loss_pct:.0f}% loss in SEED mode", flush=True)
+                        print(f"  ${self._session_start_balance:.2f} → ${self.balance:.2f}", flush=True)
+                        print(f"  Pausing for 5 minutes to break the losing streak.", flush=True)
+                        print(f"{'='*60}\n", flush=True)
+                    if now < self._session_paused_until:
+                        remaining = (self._session_paused_until - now) / 60
+                        return False, f"🚨 Session breaker ({remaining:.0f}m left)"
+                    else:
+                        # Pause expired — start new session
+                        self._session_start_balance = self.balance
+                        self._session_paused_until = 0
+
         # ── Drawdown alerts (log only, NEVER block trading) ──
         dd = self.drawdown_pct
         if dd >= 25 and not self._drawdown_alerted:

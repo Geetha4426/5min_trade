@@ -39,7 +39,7 @@ class OracleArbStrategy(BaseStrategy):
     MIN_CONFIDENCE = 0.35
 
     # Minimum edge (score difference between UP and DOWN)
-    MIN_EDGE = 0.05
+    MIN_EDGE = 0.10
 
     # Don't trade in final 20 seconds (settlement uncertainty)
     MIN_SECONDS = 20
@@ -166,6 +166,7 @@ class OracleArbStrategy(BaseStrategy):
                 'buy_pressure': flow['buy_pressure'],
                 'aligned_signals': aligned,
                 'scores': analysis['scores'],
+                'spread_pct': 2 * (entry_price - market_mid) / market_mid * 100 if market_mid > 0 else 0,
             }
         )
 
