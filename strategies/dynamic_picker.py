@@ -1,7 +1,7 @@
 """
 Dynamic Strategy Picker — ALL-IN Edition with Win Rate Learning
 
-Runs ALL 15 strategies on every scan. Trades CONTINUOUSLY.
+Runs ALL 16 strategies on every scan. Trades CONTINUOUSLY.
 Uses the BalanceManager to adjust aggression based on balance tier.
 
 NEW: Strategy Win Rate Tracking (inspired by ThinkEnigmatic/bot-arena
@@ -41,6 +41,7 @@ from strategies.probability_closer import ProbabilityCloserStrategy
 from strategies.swing_scalpers import (
     MeanReversionScalper, SpikeFade, ExpiryRush, BinanceMomentumSniper
 )
+from strategies.early_mover import EarlyMoverStrategy
 
 
 class StrategyTracker:
@@ -126,6 +127,7 @@ class DynamicPicker(BaseStrategy):
             SpikeFade(),                  # Buy cheap opposite side (NEW)
             ExpiryRush(),                 # Last-60s momentum plays (NEW)
             BinanceMomentumSniper(),      # Binance→Poly price lag (NEW)
+            EarlyMoverStrategy(),         # Buy cheap side on Binance reversal (NEW)
             CheapOutcomeHunter(),         # Lottery tickets
             MomentumReversal(),           # Catch dips
             OracleArbStrategy(),          # Chainlink delay exploit
@@ -199,6 +201,8 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.94, s.confidence + 0.12)  # High priority: real data edge
             elif sig_type == 'time_decay':
                 s.confidence = min(0.95, s.confidence + 0.08)  # Binance-confirmed near-expiry
+            elif sig_type == 'early_mover':
+                s.confidence = min(0.95, s.confidence + 0.10)  # Reversal-confirmed cheap bet
             elif sig_type in ('trend', 'mid_sniper'):
                 s.confidence = min(0.90, s.confidence + 0.05)
 
