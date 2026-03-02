@@ -477,20 +477,12 @@ class AutoRedeemer:
             target = Web3.to_checksum_address(target)
             acct = Account.from_key(self._private_key)
 
-            # ── Pre-flight: check for pending txs ──
+            # ── Pre-flight: get confirmed nonce ──
+            # NOTE: Polygon RPC 'pending' tag is unreliable (Alchemy often
+            # returns stale values showing "pending" txs that are already
+            # confirmed). We use 'latest' only and handle nonce conflicts
+            # via send_raw_transaction error handling.
             confirmed_nonce = w3.eth.get_transaction_count(acct.address, 'latest')
-            pending_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
-            pending_count = pending_nonce - confirmed_nonce
-            if pending_count > 0:
-                print(f"  ⏳ {pending_count} pending tx(s) in mempool — waiting 15s...", flush=True)
-                await asyncio.sleep(15)
-                # Re-check after waiting
-                confirmed_nonce = w3.eth.get_transaction_count(acct.address, 'latest')
-                pending_nonce = w3.eth.get_transaction_count(acct.address, 'pending')
-                if pending_nonce - confirmed_nonce > 0:
-                    print(f"  ⛔ Still {pending_nonce - confirmed_nonce} pending tx(s) — "
-                          f"skipping to avoid queue buildup", flush=True)
-                    return False
 
             # ── Pre-flight: check MATIC balance vs estimated cost ──
             gas_price = w3.eth.gas_price
@@ -558,7 +550,19 @@ class AutoRedeemer:
             })
 
             signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            except Exception as send_err:
+                err_msg = str(send_err).lower()
+                if 'nonce' in err_msg or 'replacement' in err_msg or 'already known' in err_msg:
+                    # Nonce collision — a previous tx already used this nonce.
+                    # Retry once with incremented nonce.
+                    print(f"  ⚠️ Nonce conflict, retrying with nonce {eoa_nonce + 1}...", flush=True)
+                    tx_data['nonce'] = eoa_nonce + 1
+                    signed_tx = w3.eth.account.sign_transaction(tx_data, self._private_key)
+                    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                else:
+                    raise
 
             print(f"  📨 {label}: {tx_hash.hex()}", flush=True)
 
