@@ -1232,6 +1232,20 @@ class LiveTrader:
 
         await self.check_pending_orders()
 
+        # ── Update estimated position value for session breaker accuracy ──
+        # This prevents the session breaker from false-triggering when USDC
+        # drops purely because we bought a position (not because we lost).
+        est_value = 0.0
+        for pos in self.positions.values():
+            token_id = pos['token_id']
+            cur = current_prices.get(token_id)
+            if cur is not None:
+                est_value += cur * pos.get('shares', 0)
+            else:
+                # No live price yet — use entry price as conservative estimate
+                est_value += pos.get('size_usd', 0)
+        self.balance_mgr._estimated_position_value = est_value
+
         for trade_id, pos in list(self.positions.items()):
             # Skip positions that have a pending GTC sell order
             if pos.get('_pending_sell'):
@@ -1571,7 +1585,7 @@ class LiveTrader:
                     print(f"🔄 Balance/allowance error — retrying FOK with {reduced} shares (95%)...", flush=True)
                     try:
                         retry_resp = await self._submit_order(
-                            pos['token_id'], sell_price, reduced, SELL, OrderType.FOK
+                            pos['token_id'], sell_price_aggressive, reduced, SELL, OrderType.FOK
                         )
                         if retry_resp and retry_resp.get('status') != 'error':
                             print(f"✅ Reduced-share sell succeeded!", flush=True)
@@ -1602,6 +1616,9 @@ class LiveTrader:
 
         # Always free the position slot
         self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+
+        # Clear estimated position value (recalculated next check_positions)
+        self.balance_mgr._estimated_position_value = 0.0
 
         # ── Record stop-loss cooldown to prevent immediate re-entry ──
         if reason in ('stop_loss', 'sell_failed_settle'):
@@ -1648,6 +1665,12 @@ class LiveTrader:
 
         self.trade_history.append(pos)
         self.balance_mgr.update_balance(self.balance_mgr.balance + pos['size_usd'] + net_pnl)
+
+        # ── Force on-chain balance sync after sell ──
+        # The internal balance calculation (balance + cost + pnl) can drift
+        # from reality due to fee rounding, partial fills, etc.
+        # Schedule an immediate balance check to ground-truth.
+        self._last_balance_check = 0  # Force next _get_cached_balance to refresh
 
         # ── Track consecutive wins/losses for dynamic sizing ──
         won = net_pnl > 0

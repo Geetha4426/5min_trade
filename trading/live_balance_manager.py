@@ -145,6 +145,11 @@ class LiveBalanceManager:
         self._session_start_balance: Optional[float] = None
         self._session_paused_until: float = 0
 
+        # ── Open position value tracking ──
+        # Allows session breaker to include estimated position value,
+        # preventing false triggers when USDC drops after a buy.
+        self._estimated_position_value: float = 0.0
+
     def set_mode(self, mode: str):
         """Switch risk mode."""
         mode = mode.lower()
@@ -200,6 +205,7 @@ class LiveBalanceManager:
         # Reset session breaker
         self._session_start_balance = self.balance
         self._session_paused_until = 0
+        self._estimated_position_value = 0.0
         return f"✅ Tracking reset. Peak=${self.balance:.2f}, sizing=1.00×"
 
     @property
@@ -251,14 +257,18 @@ class LiveBalanceManager:
             if self._session_start_balance is None:
                 self._session_start_balance = self.balance
             if self._session_start_balance > 0:
-                session_loss_pct = (1 - self.balance / self._session_start_balance) * 100
+                # Include estimated open position value to avoid false
+                # triggers when USDC drops purely from buying (not losing).
+                effective_balance = self.balance + self._estimated_position_value
+                session_loss_pct = (1 - effective_balance / self._session_start_balance) * 100
                 if session_loss_pct >= 40:
                     now = time.time()
                     if self._session_paused_until == 0:
                         self._session_paused_until = now + 300  # 5 min pause
                         print(f"\n{'='*60}", flush=True)
                         print(f"🚨 SESSION BREAKER: -{session_loss_pct:.0f}% loss in SEED mode", flush=True)
-                        print(f"  ${self._session_start_balance:.2f} → ${self.balance:.2f}", flush=True)
+                        print(f"  ${self._session_start_balance:.2f} → ${effective_balance:.2f} "
+                              f"(USDC ${self.balance:.2f} + positions ~${self._estimated_position_value:.2f})", flush=True)
                         print(f"  Pausing for 5 minutes to break the losing streak.", flush=True)
                         print(f"{'='*60}\n", flush=True)
                     if now < self._session_paused_until:
