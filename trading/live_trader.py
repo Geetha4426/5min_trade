@@ -41,8 +41,8 @@ class LiveTrader:
     """
 
     ORDER_TIMEOUT = 60  # Cancel unfilled orders after 60 seconds (thin 5m markets need more time)
-    BASE_TAKER_FEE_RATE = 0.0156  # ~1.56% dynamic taker fee on 5m/15m crypto markets
-    TAKER_FEE_RATE = 0.0156  # Updated dynamically per-trade
+    BASE_TAKER_FEE_RATE = 0.03125  # ~3.125% effective taker fee at p=0.50 (peak ~3.7% at p≈0.33)
+    TAKER_FEE_RATE = 0.03125  # Updated dynamically per-trade via _get_dynamic_fee_rate
 
     def __init__(self, db: Database, balance_mgr: LiveBalanceManager):
         self.db = db
@@ -193,18 +193,13 @@ class LiveTrader:
                         print(f"   Deploy relay_server.py on a VPS in an allowed region.", flush=True)
                 # Non-fatal — might still work
 
-            # Step 4: Fetch dynamic fee rate
-            try:
-                import requests
-                resp = requests.get(f"{host}/fees", timeout=5)
-                if resp.status_code == 200:
-                    fee_data = resp.json()
-                    fee_rate = float(fee_data.get('taker', fee_data.get('fee_rate', self.TAKER_FEE_RATE)))
-                    self.TAKER_FEE_RATE = fee_rate
-                    self.BASE_TAKER_FEE_RATE = fee_rate
-                    print(f"💰 Taker fee rate: {fee_rate:.4f} ({fee_rate*100:.2f}%)", flush=True)
-            except Exception as e:
-                print(f"⚠️ Fee rate fetch failed, using default: {e}", flush=True)
+            # Step 4: Log fee formula info
+            # Fee is calculated per-trade via _get_dynamic_fee_rate(price).
+            # Formula: rate = 0.25 × p × (1-p)²  (from Polymarket docs)
+            # Don't fetch from /fees endpoint — it returns per-token bps that
+            # the CLOB handles internally.  Our formula matches the official docs.
+            print(f"💰 Fee formula: 0.25×p×(1-p)² | At p=0.50: 3.13% | "
+                  f"At p=0.78 (entry cap): 0.94%", flush=True)
 
             # Step 5: Check actual balance
             real_balance = await self.fetch_balance()
@@ -793,29 +788,33 @@ class LiveTrader:
         return results[0] if results else None
 
     def _get_dynamic_fee_rate(self, price: float) -> float:
-        """Calculate per-trade fee rate based on probability (price).
+        """Calculate per-trade EFFECTIVE fee rate based on share price.
         
-        Polymarket's REAL taker fee formula (post Feb 2026 update):
-            fee_rate = C × 0.25 × (p × (1−p))²
-        where C is a scaling constant calibrated so that at p=0.50
-        the fee equals BASE_TAKER_FEE_RATE (≈1.56%).
+        Polymarket's taker fee on 5min/15min crypto markets:
+            fee_amount = C × 0.25 × [p × (1-p)]²
+        where C = number of shares, p = price (probability 0-1).
         
-        At p=0.50: 0.25*(0.5*0.5)^2 = 0.015625 → C = BASE/0.015625
-        At p=0.10: 0.25*(0.1*0.9)^2 = 0.002025 → fee ≈ 0.20% (was 0.56% old formula!)
-        At p=0.05: 0.25*(0.05*0.95)^2 ≈ 0.000564 → fee ≈ 0.06% (was 0.30% old!)
+        Effective fee rate = fee_amount / trade_value (C × p):
+            rate = 0.25 × p × (1-p)²
         
-        The old formula (4*p*(1-p)) was LINEAR and overestimated fees by 4-8x
-        at cheap price levels, causing the bot to SKIP profitable trades.
+        Verified against:
+            - docs.polymarket.com/trading/fees
+            - Polymarket ctf-exchange/Fees.sol contracts
+            - X dev posts: @TVS_Kolia, @DextersSolab, @0xPhilanthrop
+        
+        Rate at key prices:
+            p=0.33: ~3.70% (peak)  |  p=0.50: 3.125%
+            p=0.65: 1.99%          |  p=0.78: 0.94%
+            p=0.10: 2.03%          |  p=0.90: 0.23%
+        
+        Key insight: settlement is FREE. Round-trip (buy+sell) costs
+        double the rate. Buy+hold-to-settlement costs the rate ONCE.
         """
         p = max(0.001, min(0.999, price))
         q = 1.0 - p
-        # Quadratic scaling: (p*q)^2 peaks at 0.0625 when p=0.5
-        pq_squared = (p * q) ** 2
-        # C calibrated so fee = BASE_TAKER_FEE_RATE at p=0.50
-        # At p=0.50: 0.25 * 0.0625 = 0.015625, so C = BASE / 0.015625
-        C = self.BASE_TAKER_FEE_RATE / 0.015625
-        fee = C * 0.25 * pq_squared
-        return max(0.0, min(self.BASE_TAKER_FEE_RATE, fee))
+        # Effective rate = 0.25 × p × (1-p)²
+        # Peaks at p = 1/3 ≈ 3.70%, NOT at p = 0.50 (3.125%)
+        return 0.25 * p * q * q
 
     async def _place_buy(self, signal: TradeSignal, size: float, use_fok: bool = False) -> Optional[Dict]:
         """Place a buy order on the CLOB.
@@ -833,7 +832,8 @@ class LiveTrader:
 
             # Calculate per-trade dynamic fee based on probability
             trade_fee = self._get_dynamic_fee_rate(price)
-            self.TAKER_FEE_RATE = trade_fee  # Update for PnL calcs
+            # Don't mutate self.TAKER_FEE_RATE — fee is stored per-position
+            # in trade['fee_rate'] so concurrent positions use their own rate
 
             # ── Check minimum edge after fees ──
             min_edge = getattr(Config, 'MIN_EDGE_AFTER_FEES', 0.03)
@@ -958,7 +958,7 @@ class LiveTrader:
                 'rationale': signal.rationale,
                 'metadata': signal.metadata,
                 'placed_at': time.time(),
-                'fee_rate': self.TAKER_FEE_RATE,
+                'fee_rate': trade_fee,
                 'order_type': order_type_tag,
                 '_live': True,
             }
@@ -1030,7 +1030,7 @@ class LiveTrader:
                                 'exit_time': None, 'exit_reason': None,
                                 'status': 'pending', 'rationale': signal.rationale,
                                 'metadata': signal.metadata, 'placed_at': time.time(),
-                                'fee_rate': self.TAKER_FEE_RATE, 'order_type': 'GTC',
+                                'fee_rate': trade_fee, 'order_type': 'GTC',
                                 '_live': True,
                             }
                             self.pending_orders[trade_id] = trade
@@ -1295,15 +1295,17 @@ class LiveTrader:
         if entry_price <= 0:
             return 'hold'
 
-        # Use per-position fee rate, fallback to global
-        fee = fee_rate if fee_rate is not None else self.TAKER_FEE_RATE
+        # Entry fee: stored per-position at buy time
+        entry_fee = fee_rate if fee_rate is not None else self._get_dynamic_fee_rate(entry_price)
+        # Sell fee: calculated at CURRENT price (sell fee depends on sell price)
+        sell_fee = self._get_dynamic_fee_rate(current_price)
 
-        # Fee-aware calculations
-        net_gain = (current_price * (1 - fee)) / (entry_price * (1 + fee))
+        # Fee-aware calculations: what we'd NET if we sell NOW
+        net_gain = (current_price * (1 - sell_fee)) / (entry_price * (1 + entry_fee))
         pnl_pct = (net_gain - 1) * 100
         
-        # How much could we gain if we hold to settlement ($1)?
-        max_payout_gain = (1.0 * (1 - fee)) / (entry_price * (1 + fee))
+        # Settlement is FREE (0% exit fee) — max payout if market resolves at $1.00
+        max_payout_gain = 1.0 / (entry_price * (1 + entry_fee))
         # How much current gain as fraction of max possible
         gain_captured = (net_gain - 1) / (max_payout_gain - 1) if max_payout_gain > 1 else 0
 
@@ -1670,9 +1672,12 @@ class LiveTrader:
 
         # ── Normal close: position was actually sold ──
         # Subtract estimated taker fees from PnL (entry + exit)
-        fee_rate = pos.get('fee_rate', self.TAKER_FEE_RATE)
-        entry_fee = pos['entry_price'] * pos.get('shares', 0) * fee_rate
-        exit_fee = exit_price * pos.get('shares', 0) * fee_rate
+        # Entry fee: rate at entry price (stored per-position)
+        entry_fee_rate = pos.get('fee_rate', self._get_dynamic_fee_rate(pos['entry_price']))
+        # Exit fee: rate at exit price (different from entry — fee depends on price)
+        exit_fee_rate = self._get_dynamic_fee_rate(exit_price)
+        entry_fee = pos['entry_price'] * pos.get('shares', 0) * entry_fee_rate
+        exit_fee = exit_price * pos.get('shares', 0) * exit_fee_rate
         total_fees = entry_fee + exit_fee
         net_pnl = pnl - total_fees
 

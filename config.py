@@ -150,9 +150,12 @@ class Config:
     FLASH_DROP_THRESHOLD = float(os.getenv('FLASH_DROP_THRESHOLD', '0.25'))
     FLASH_LOOKBACK_SECONDS = int(os.getenv('FLASH_LOOKBACK_SECONDS', '15'))
 
-    # Dynamic taker fees — peak rate at 50% probability
-    # Real formula: fee = C × 0.25 × (p×(1-p))² — quadratic, NOT linear
-    TAKER_FEE_RATE = float(os.getenv('TAKER_FEE_RATE', '0.0156'))  # ~1.56% peak at p=0.50
+    # Dynamic taker fees — Polymarket 5min/15min crypto markets
+    # Formula: fee = C × 0.25 × [p×(1−p)]², effective rate = 0.25 × p × (1−p)²
+    # Peak ~3.7% at p≈0.33, 3.125% at p=0.50, 0.94% at p=0.78
+    # Settlement is FREE.  This constant is a reference fallback only —
+    # live_trader._get_dynamic_fee_rate(price) computes the real per-trade rate.
+    TAKER_FEE_RATE = float(os.getenv('TAKER_FEE_RATE', '0.03125'))  # 3.125% at p=0.50
 
     # Oracle Arb
     ORACLE_PRICE_BUFFER = float(os.getenv('ORACLE_PRICE_BUFFER', '0.005'))  # 0.5%

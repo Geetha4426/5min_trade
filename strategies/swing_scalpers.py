@@ -54,6 +54,7 @@ class MeanReversionScalper(BaseStrategy):
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         poly_feed = context.get('poly_feed')
         clob = context.get('clob')
+        binance_feed = context.get('binance_feed')
         seconds_remaining = context.get('seconds_remaining', 0)
 
         if not poly_feed or not clob:
@@ -61,6 +62,25 @@ class MeanReversionScalper(BaseStrategy):
 
         if seconds_remaining < self.MIN_SECONDS_LEFT:
             return None
+
+        # ── Binance confirmation: only buy crash if Binance is NOT
+        #    confirming the crash direction (flat or reversing) ──
+        # If Binance confirms the crash → it's a REAL move, no bounce.
+        # If Binance is flat/reversing → crash was overreaction → bounce likely.
+        binance_direction = None
+        if binance_feed:
+            coin = market.get('coin', '')
+            price_hist = binance_feed.price_history.get(coin)
+            if price_hist and len(price_hist) >= 2:
+                now_b = time.time()
+                recent_b = [s for s in price_hist if s.timestamp > now_b - 30]
+                if len(recent_b) >= 2:
+                    btc_change = (recent_b[-1].price - recent_b[0].price) / recent_b[0].price * 100
+                    if btc_change > 0.03:
+                        binance_direction = 'UP'
+                    elif btc_change < -0.03:
+                        binance_direction = 'DOWN'
+                    # else: flat → no filter applied
 
         for side, token_key in [('UP', 'up_token_id'), ('DOWN', 'down_token_id')]:
             token_id = market.get(token_key, '')
@@ -87,6 +107,17 @@ class MeanReversionScalper(BaseStrategy):
             if not (self.MIN_ENTRY_PRICE < current <= self.MAX_ENTRY_PRICE):
                 continue
 
+            # ── Binance filter: skip if Binance confirms the crash ──
+            # UP crashed → Binance is DOWN (confirms) → skip
+            # DOWN crashed → Binance is UP (confirms) → skip
+            if binance_direction:
+                crash_confirmed = (
+                    (side == 'UP' and binance_direction == 'DOWN') or
+                    (side == 'DOWN' and binance_direction == 'UP')
+                )
+                if crash_confirmed:
+                    continue  # Crash is real, no bounce expected
+
             # BOTTOM CHECK: last 2 ticks should be stable or rising
             if len(prices) >= 3:
                 last3 = prices[-3:]
@@ -107,6 +138,14 @@ class MeanReversionScalper(BaseStrategy):
 
             # Confidence: bigger drop + more stable bottom = higher
             confidence = min(0.85, 0.55 + drop * 1.5)
+
+            # Boost if Binance is actively REVERSING toward our side
+            binance_supports = (
+                (side == 'UP' and binance_direction == 'UP') or
+                (side == 'DOWN' and binance_direction == 'DOWN')
+            )
+            if binance_supports:
+                confidence = min(0.92, confidence + 0.06)
 
             # Boost if we have very cheap entry + big drop (but cap at 0.88
             # to stay below SEED's 0.90 confidence floor — ultra-cheap mean
@@ -208,6 +247,26 @@ class SpikeFade(BaseStrategy):
         if not candidates:
             return None
 
+        # ── Binance confirmation: only fade the spike if Binance is NOT
+        #    confirming the spike direction (flat or reversing) ──
+        # If Binance confirms the spike → it's a REAL move, won't fade.
+        # If Binance is flat/reversing → overreaction → fade likely.
+        binance_direction = None
+        if poly_feed:
+            binance_feed = context.get('binance_feed')
+            if binance_feed:
+                coin = market.get('coin', '')
+                price_hist = binance_feed.price_history.get(coin)
+                if price_hist and len(price_hist) >= 2:
+                    now_b = time.time()
+                    recent_b = [s for s in price_hist if s.timestamp > now_b - 30]
+                    if len(recent_b) >= 2:
+                        btc_change = (recent_b[-1].price - recent_b[0].price) / recent_b[0].price * 100
+                        if btc_change > 0.03:
+                            binance_direction = 'UP'
+                        elif btc_change < -0.03:
+                            binance_direction = 'DOWN'
+
         for buy_side, buy_token, buy_price, buy_book, spike_side, spike_token, spike_price in candidates:
             # Verify it's a genuine SPIKE (not gradual drift)
             history = poly_feed.price_history.get(spike_token)
@@ -218,7 +277,13 @@ class SpikeFade(BaseStrategy):
                     move = recent[-1].price - recent[0].price
                     if abs(move) < self.MIN_SPIKE_SPEED:
                         continue  # Gradual — not a spike
-            
+
+            # ── Binance filter: skip if Binance confirms the spike ──
+            # UP spiked + Binance UP → spike is real → don't fade
+            # DOWN spiked + Binance DOWN → spike is real → don't fade
+            if binance_direction == spike_side:
+                continue  # Spike confirmed by Binance — won't fade
+
             if buy_book['ask_depth'] < 0.30:
                 continue
 
@@ -226,6 +291,14 @@ class SpikeFade(BaseStrategy):
             potential_return = 0.30 / buy_price if buy_price > 0 else 0 # Target 30¢ bounce
 
             confidence = min(0.88, 0.55 + (spike_price - 0.80) * 3 + (0.20 - buy_price) * 2)
+
+            # Boost if Binance is actively REVERSING against the spike
+            binance_opposes_spike = (
+                binance_direction is not None and
+                binance_direction != spike_side
+            )
+            if binance_opposes_spike:
+                confidence = min(0.93, confidence + 0.06)
 
             return TradeSignal(
                 strategy=self.name,

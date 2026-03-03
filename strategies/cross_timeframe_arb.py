@@ -44,15 +44,14 @@ class CrossTimeframeArbStrategy(BaseStrategy):
     # Minimum profit per share to bother (AFTER FEES)
     MIN_PROFIT = 0.03  # 3¢ = ~3% net of fees
 
-    # Estimated taker fee rate per leg — use dynamic formula
+    # Estimated taker fee rate per leg — dynamic per price
     @staticmethod
     def _dynamic_fee(price: float) -> float:
-        """Correct Polymarket fee: C × 0.25 × (p×(1-p))²."""
+        """Polymarket effective fee rate: 0.25 × p × (1-p)².
+        Peak ~3.7% at p≈0.33. Settlement is FREE (0%)."""
         p = max(0.001, min(0.999, price))
         q = 1.0 - p
-        pq_sq = (p * q) ** 2
-        C = 0.0156 / 0.015625
-        return max(0.0, min(0.0156, C * 0.25 * pq_sq))
+        return 0.25 * p * q * q
 
     # Minimum depth on both sides (avoid thin markets)
     MIN_DEPTH = 2.0  # $2

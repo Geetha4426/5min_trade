@@ -154,8 +154,9 @@ class StraddleStrategy(BaseStrategy):
         combined = up_ask + down_ask
 
         # CRITICAL: if combined >= $0.92, guaranteed loss after fees
-        # Both sides pay out exactly $1.00 at settlement
-        # Fees at ~50¢ each: 2 × ~1.56% = ~3.12¢ → need combined ≤ $0.92
+        # Both sides pay out exactly $1.00 at settlement (FREE)
+        # Entry fee = 0.25 × p × (1-p)², at p≈0.50 ≈ 3.125% → ~1.56¢ per side
+        # Two legs ≈ 3.12¢; threshold $0.92 gives ≥ $0.05 buffer for safety
         if combined >= 0.92:
             return None
 
@@ -244,9 +245,9 @@ class SpreadScalper(BaseStrategy):
                 mid_price = (book['best_ask'] + book['best_bid']) / 2
                 
                 # Profit target: sell at mid (half the spread minus fees)
-                # Fee at mid ≈ dynamic, but at most ~1.56% × 2 legs ≈ 3.12%
-                # Need spread/2 > 3.12% of entry price to profit
-                min_profit_spread = book['best_ask'] * 0.035  # ~3.5% for fees
+                # Fee = 0.25 × p × (1-p)², peak ~3.7% at p≈0.33
+                # Need spread/2 > ~7% of entry price for round-trip profit
+                min_profit_spread = book['best_ask'] * 0.07  # ~7% for round-trip fees
                 if spread / 2 < min_profit_spread:
                     continue
 

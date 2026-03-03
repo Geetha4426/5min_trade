@@ -393,19 +393,30 @@ class LiveBalanceManager:
         """Which strategies are enabled at this mode.
         
         ALL modes enable ALL strategies — the confidence floor is the ONLY filter.
-        EXCEPT: SEED mode explicitly blocks high-risk strategies:
-        - cheap_hunter / penny_sniper: lottery bets that can wipe out $1-5
-        - prob_closer: pays $0.90-0.95 for 5-10% discount — one loss = -40% of
-          SEED balance.  Terrible risk/reward at <$5.
-        - oracle_arb: confidence is artificially capped at 0.90 (exactly SEED
-          threshold), so it always passes.  But it lacks Binance cross-validation
-          and repeatedly bought the wrong direction in live testing (3 consecutive
-          stop-losses in 60 seconds, -$1.17).  Only allow in CONCENTRATION+.
+        EXCEPT:
+        
+        SEED ($1-5): blocks cheap_hunter, penny_sniper, prob_closer, oracle_arb
+          - Lottery bets and thin-edge plays can wipe out $1-5 instantly.
+        
+        CONCENTRATION ($5-20): blocks prob_closer, oracle_arb
+          - prob_closer: buys $0.90-0.95 for 5-10% edge.  One loss = -$1+
+            on a $10 account.  Terrible R:R below $20.
+          - oracle_arb: fires too often on noise and lost $1.17 in 60s
+            during live testing (3 stop-losses in a row).  Needs larger
+            bankroll to absorb variance.
+        
+        MEDIUM/AGGRESSIVE ($20+): all 16 strategies enabled.
         """
         disabled = []
         if self.mode_name == 'seed':
             # SEED = capital preservation. Block strategies with bad risk/reward.
             disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer', 'oracle_arb']
+        elif self.mode_name == 'concentration':
+            # CONCENTRATION ($5-20): prob_closer buys at $0.90-0.95 for 5-10%
+            # edge.  One loss wipes $1+ on a $10 account — terrible R:R.
+            # oracle_arb fires too often on noise and lost $1.17 in 60s during
+            # live testing.  Both need a larger bankroll to absorb variance.
+            disabled = ['prob_closer', 'oracle_arb']
 
         return {
             'enabled': 'all',
