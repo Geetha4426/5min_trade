@@ -1357,38 +1357,60 @@ class LiveTrader:
 
         # ── HIGH-PROBABILITY entry (>$0.80): Hold for $1 settlement ──
         if entry_price >= 0.80:
-            # Already captured 70%+ of max gain, and time running out → take profit
-            if gain_captured >= 0.70 and seconds_remaining < 30:
-                return 'sell'
             # Price reversed below entry → market is turning against us
             if current_price < entry_price * 0.92 and seconds_remaining > 30:
                 return 'cut_loss'
-            # Near expiry and still profitable → sell (don't risk last-second reversal)
-            if seconds_remaining < 10 and pnl_pct > 2:
-                return 'sell'
+            # Last 10s: always hold — settlement is imminent and free
+            if seconds_remaining < 10:
+                return 'hold'
             # Otherwise hold — let it settle at $1
             return 'hold'
 
-        # ── MID-PROBABILITY entry ($0.30-$0.80): Dynamic targets ──
+        # ── MID-PROBABILITY entry ($0.30-$0.80): Smart exit targets ──
+        # Math: selling costs ~1.5% fee. Settlement to $1.00 is FREE.
+        # But settlement to $0.00 = total loss. Key: only hold for
+        # settlement when IMPLIED WIN PROBABILITY is high enough (≥85%).
+        # Below 85%: the 15%+ risk of losing entire position outweighs
+        # the 1.5% fee savings, especially with a small bankroll.
         if entry_price >= 0.30:
-            # Big move in our favor — take some profit based on time left
-            if seconds_remaining > 60:
-                # Lots of time left — need bigger moves to exit early
-                if pnl_pct >= 30:
-                    return 'sell'
-            elif seconds_remaining > 20:
-                # Getting close to expiry — lower the bar
-                if pnl_pct >= 15:
-                    return 'sell'
-            else:
-                # Last 20 seconds — any profit is good
+            # ── LAST 10s: Settlement imminent ──
+            if seconds_remaining < 10:
+                if current_price >= 0.85:
+                    return 'hold'  # 85%+ win prob: hold for FREE settlement
+                if pnl_pct < -10:
+                    return 'cut_loss'  # Deep red → bail before $0
                 if pnl_pct > 3:
-                    return 'sell'
-            
+                    return 'sell'  # Lock small profit, don't gamble
+                return 'hold'  # Breakeven: not worth selling for dust
+
+            # ── LAST 30s: Conservative settlement hold ──
+            if seconds_remaining <= 30:
+                if current_price >= 0.90:
+                    return 'hold'  # 90%+ → near-certain win, save the fee
+                if current_price >= 0.85 and pnl_pct > 10:
+                    return 'hold'  # 85%+ AND solidly profitable → hold
+                if pnl_pct < -10:
+                    return 'cut_loss'
+                if pnl_pct >= 15:
+                    return 'sell'  # Below 85% win prob: SELL to lock profit
+                if pnl_pct > 3:
+                    return 'sell'  # Small profit + uncertain → lock it
+                return 'hold'  # Near-breakeven: hold, fee would eat profit
+
+            # ── 30-60s left: Only sell if strong gain ──
+            if seconds_remaining > 30:
+                if pnl_pct >= 30:
+                    return 'sell'  # 30%+ gain with time left = bank it
+
+            # ── 60+ seconds left: Even higher bar for early exit ──
+            if seconds_remaining > 60:
+                if pnl_pct >= 40:
+                    return 'sell'  # 40%+ early = take profit
+
             # Time running out and losing → cut before settlement
             if seconds_remaining < 20 and pnl_pct < -5:
                 return 'cut_loss'
-            
+
             return 'hold'
 
         # ── CHEAP entry (<$0.30): Lottery tickets — smart profit taking ──

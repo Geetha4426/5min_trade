@@ -33,7 +33,7 @@ class TimeDecayStrategy(BaseStrategy):
     # Minimum market lead: winning side must be at least this much higher
     MIN_MARKET_LEAD = 0.06  # 6¢ minimum spread between up/down ask
     # Minimum Binance move to confirm direction (% change)
-    MIN_BINANCE_MOVE_PCT = 0.03  # 0.03% — low bar since we're near expiry
+    MIN_BINANCE_MOVE_PCT = 0.04  # 0.04% — slightly higher bar to filter noise
 
     def __init__(self):
         self.max_remaining = Config.DECAY_MAX_REMAINING_SECONDS
@@ -129,8 +129,8 @@ class TimeDecayStrategy(BaseStrategy):
 
         discount = fair_value - winning_ask
 
-        if discount < self.min_discount or winning_ask >= 0.92:
-            return None  # Not enough discount
+        if discount < self.min_discount or winning_ask >= 0.78:
+            return None  # Cap entries at 78¢ — above this, fees eat most of the edge
 
         # ── Confidence: base + discount + Binance strength ──
         confidence = 0.70 + discount  # Base: 0.70 + discount (e.g. 0.20 → 0.90)
