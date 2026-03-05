@@ -208,7 +208,8 @@ class SpikeFade(BaseStrategy):
     SPIKE_THRESHOLD = 0.82     # One side must be 82¢+
     CHEAP_THRESHOLD = 0.18     # Other side must be 18¢ or less
     MIN_SPIKE_SPEED = 0.10     # Must have moved 10¢+ in last 20s (genuine spike)
-    MIN_SECONDS_LEFT = 45      # Need enough time for the fade (was 25 — too risky)
+    MIN_SECONDS_LEFT = 60      # Need enough time for the fade (raised from 45)
+    MIN_ENTRY_PRICE = 0.03     # No penny bets — 1¢-2¢ entries have zero fade time
 
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         poly_feed = context.get('poly_feed')
@@ -287,6 +288,16 @@ class SpikeFade(BaseStrategy):
             if buy_book['ask_depth'] < 0.30:
                 continue
 
+            # Reject ultra-cheap entries — no time for a fade at pennies
+            if buy_price < self.MIN_ENTRY_PRICE:
+                continue
+
+            # Scale time requirement by price: cheaper = need MORE time
+            # At 3¢ need 60s, at 10¢ need 45s, at 18¢ need 30s
+            min_time_needed = max(30, int(60 - (buy_price - 0.03) * 200))
+            if seconds_remaining < min_time_needed:
+                continue
+
             # Calculate potential
             potential_return = 0.30 / buy_price if buy_price > 0 else 0 # Target 30¢ bounce
 
@@ -351,7 +362,7 @@ class ExpiryRush(BaseStrategy):
     description = "Aggressive last-minute plays on clear momentum"
 
     MAX_SECONDS = 60           # Last 60 seconds
-    MIN_SECONDS = 8            # Not too close to settlement
+    MIN_SECONDS = 15           # Not too close to settlement (need time to exit)
     MIN_MOMENTUM = 0.08        # At least 8¢ move in last 15s
     MAX_ENTRY = 0.75           # Don't overpay (under 75¢)
     MIN_ENTRY = 0.10           # Need reasonable price

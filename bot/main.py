@@ -64,6 +64,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("stratstats", self.cmd_stratstats))
         self.app.add_handler(CommandHandler("cheaphunter", self.cmd_cheaphunter))
         self.app.add_handler(CommandHandler("redeem", self.cmd_redeem))
+        self.app.add_handler(CommandHandler("logs", self.cmd_logs))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -91,6 +92,7 @@ class TelegramBot:
                 BotCommand("seed", "$1 start — arb-only seed mode"),
                 BotCommand("cheaphunter", "🎰 Lottery ticket mode — $1 bets across all TFs"),
                 BotCommand("redeem", "Claim resolved positions on-chain"),
+                BotCommand("logs", "Download trade log CSV"),
                 BotCommand("history", "Trade history"),
                 BotCommand("settings", "Bot settings"),
             ])
@@ -249,14 +251,17 @@ class TelegramBot:
                 f"   Tradeable: ${live_stats.get('tradeable', 0):.2f}\n"
             )
 
-            # Show seed mode progress
-            if self.engine.live_balance_mgr.mode_name == 'seed':
-                from trading.live_balance_manager import SEED_GRADUATE_BALANCE
+            # Show seed/plant mode progress
+            if self.engine.live_balance_mgr.mode_name in ('seed', 'plant'):
+                from trading.live_balance_manager import GRADUATION_THRESHOLDS
+                mode_name = self.engine.live_balance_mgr.mode_name
+                grad_target, grad_balance = GRADUATION_THRESHOLDS.get(mode_name, ('', 5.0))
                 current = real_bal if real_bal else tracked_bal
-                progress = min(100, current / SEED_GRADUATE_BALANCE * 100)
+                progress = min(100, current / grad_balance * 100)
                 bar_filled = int(progress / 10)
                 bar = '█' * bar_filled + '░' * (10 - bar_filled)
-                text += f"   🌱 Seed: [{bar}] {progress:.0f}% → ${SEED_GRADUATE_BALANCE:.2f}\n"
+                emoji = '🌱' if mode_name == 'seed' else '🌿'
+                text += f"   {emoji} {mode_name.upper()}: [{bar}] {progress:.0f}% → ${grad_balance:.2f}\n"
         else:
             text += "🔴 Live: Not configured\n"
 
@@ -311,6 +316,59 @@ class TelegramBot:
 
         except Exception as e:
             await update.message.reply_text(f"❌ Redeem error: {e}")
+
+    async def cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Download trade log CSV file.
+        Usage: /logs — sends full CSV
+               /logs 50 — sends last 50 trades
+        """
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not initialized")
+            return
+
+        from trading.trade_logger import TradeLogger, LOG_FILE
+        import os
+
+        if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
+            await update.message.reply_text("📭 No trade logs yet. Trades will be logged as they happen.")
+            return
+
+        # Check for optional line limit
+        limit = None
+        if context.args:
+            try:
+                limit = int(context.args[0])
+            except ValueError:
+                pass
+
+        try:
+            if limit:
+                # Send only last N trades as a trimmed file
+                import tempfile
+                with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                header = lines[0] if lines else ''
+                data_lines = lines[1:]
+                tail = data_lines[-limit:] if len(data_lines) > limit else data_lines
+                tmp_path = os.path.join(tempfile.gettempdir(), f'trades_last_{limit}.csv')
+                with open(tmp_path, 'w', encoding='utf-8', newline='') as tmp:
+                    tmp.write(header)
+                    tmp.writelines(tail)
+                send_path = tmp_path
+                caption = f"📊 Last {len(tail)} trades"
+            else:
+                send_path = LOG_FILE
+                logger = TradeLogger()
+                caption = f"📊 Full trade log — {logger.trade_count} trades ({logger.file_size_kb:.1f} KB)"
+
+            with open(send_path, 'rb') as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename='trades_log.csv',
+                    caption=caption,
+                )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error sending log: {e}")
 
     async def cmd_strategy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show strategy selection."""
@@ -529,7 +587,7 @@ class TelegramBot:
             f"• 90%+ confidence required\n"
             f"• 1 position at a time (focused)\n"
             f"• Zero reserve — every cent works\n"
-            f"• Auto-upgrades to 🎯 CONCENTRATION at ${SEED_GRADUATE_BALANCE:.2f}\n\n"
+            f"• Auto-upgrades to � PLANT at ${SEED_GRADUATE_BALANCE:.2f}\n\n"
             f"Strategies active:\n"
             f"  ✅ YES+NO Arb (guaranteed)\n"
             f"  ✅ Cross-Timeframe Arb (guaranteed)\n"

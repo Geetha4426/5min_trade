@@ -68,6 +68,7 @@ class TradingEngine:
             mode=Config.LIVE_RISK_MODE,
         )
         self.live_trader = LiveTrader(self.db, self.live_balance_mgr)
+        self.live_trader.clob_reader = self.clob  # Orderbook reader for smart exits
 
         # Active trading mode: 'paper' or 'live'
         self.trading_mode = Config.TRADING_MODE
@@ -408,6 +409,7 @@ class TradingEngine:
                         'poly_feed': self.poly_feed,
                         'binance_feed': self.binance_feed,
                         'seconds_remaining': seconds_remaining,
+                        'balance_mgr': self.trader.balance_mgr if self.trader else None,
                     }
 
                     # Dynamic picker gets balance preferences

@@ -80,6 +80,10 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         if not clob or seconds_remaining <= 0:
             return None
 
+        # In SEED/PLANT mode, require higher profit margin for arb
+        balance_mgr = context.get('balance_mgr')
+        self._seed_mode = balance_mgr and getattr(balance_mgr, 'mode_name', '') in ('seed', 'plant')
+
         coin = market['coin']
         timeframe = market['timeframe']
         market_id = market['market_id']
@@ -221,7 +225,10 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         # === FILTER ===
         if combined_cost > self.MAX_COMBINED_COST:
             return None
-        if profit < self.MIN_PROFIT:
+
+        # SEED/PLANT: higher edge bar (5¢ net) since capital is precious
+        min_profit = 0.05 if getattr(self, '_seed_mode', False) else self.MIN_PROFIT
+        if profit < min_profit:
             return None
 
         # Check liquidity

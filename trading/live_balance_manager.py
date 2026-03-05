@@ -53,6 +53,17 @@ LIVE_MODES = {
         min_confidence=0.90,    # Very high bar — only near-certain trades fire
         description='$1-5 start — 2 positions, 0.90 confidence, safe growth',
     ),
+    'plant': LiveRiskMode(
+        name='PLANT',
+        emoji='🌿',
+        max_bet_pct=35.0,       # 35% — bigger bets than seed, still safe
+        reserve_pct=20.0,       # 20% reserve
+        reserve_min=2.0,        # Always keep $2
+        max_pos_per_dollar=0.5, # 1 position per $2
+        max_positions_cap=3,    # 3 positions max
+        min_confidence=0.90,    # Same high bar as SEED — only best signals
+        description='$5-15 — SEED confidence with dynamic $2-4 sizing',
+    ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
         emoji='🎯',
@@ -89,11 +100,13 @@ LIVE_MODES = {
 }
 
 # Auto-graduation thresholds
-# The bot progresses: seed → concentration → medium → aggressive
+# The bot progresses: seed → plant → medium → aggressive
+# (concentration is an alternative manual mode at the same $5-20 range)
 GRADUATION_THRESHOLDS = {
-    'seed': ('concentration', 5.0),       # $5 → graduate to concentration
-    'concentration': ('medium', 20.0),    # $20 → graduate to medium
-    'medium': ('aggressive', 100.0),      # $100 → graduate to aggressive
+    'seed': ('plant', 5.0),           # $5 → graduate to plant
+    'plant': ('medium', 20.0),        # $20 → graduate to medium
+    'concentration': ('medium', 20.0),# $20 → graduate to medium
+    'medium': ('aggressive', 100.0),  # $100 → graduate to aggressive
 }
 
 # Exported constant for bot/main.py seed progress display
@@ -248,12 +261,10 @@ class LiveBalanceManager:
         by_min_size = int(self.tradeable_balance / Config.POLYMARKET_MIN_ORDER_SIZE)
         return max(1, min(by_balance, by_min_size, self.mode.max_positions_cap))
 
-    def can_trade(self) -> tuple:
+    def can_trade(self, is_arb: bool = False) -> tuple:
         """Check if we can open a new position. Drawdown is alert-only, never blocks."""
-        # ── Session loss circuit breaker (SEED only) ──
-        # If we've lost >40% of session starting balance, pause 5 min.
-        # Prevents: $4.98 → $2.38 (52% drawdown) in 90 seconds with no pause.
-        if self.mode_name == 'seed':
+        # ── Session loss circuit breaker (SEED/PLANT only) ──
+        if self.mode_name in ('seed', 'plant'):
             if self._session_start_balance is None:
                 self._session_start_balance = self.balance
             if self._session_start_balance > 0:
@@ -293,8 +304,14 @@ class LiveBalanceManager:
             return False, "💀 Balance below minimum order size"
         if self.tradeable_balance < Config.POLYMARKET_MIN_ORDER_SIZE:
             return False, f"🛡️ Only reserve left (${self.reserve:.2f})"
-        if self.open_positions >= self.max_positions:
-            return False, f"📊 {self.open_positions}/{self.max_positions} positions open"
+
+        # Dynamic arb slot: SEED/PLANT allow +1 position for dual-leg arb
+        effective_cap = self.max_positions
+        if is_arb and self.mode_name in ('seed', 'plant'):
+            effective_cap = min(self.mode.max_positions_cap + 1, 3)
+
+        if self.open_positions >= effective_cap:
+            return False, f"📊 {self.open_positions}/{effective_cap} positions open"
         return True, f"{self.mode.emoji} {self.mode.name}"
 
     def can_afford_dual_leg(self) -> bool:
@@ -370,6 +387,7 @@ class LiveBalanceManager:
             'aggressive': ('medium', 100.0),
             'medium': ('concentration', 20.0),
             'concentration': ('seed', 5.0),
+            'plant': ('seed', 3.0),    # Drop below $3 → back to seed
         }
         demote = DEMOTION.get(self.mode_name)
         if demote:
@@ -408,8 +426,8 @@ class LiveBalanceManager:
         MEDIUM/AGGRESSIVE ($20+): all 16 strategies enabled.
         """
         disabled = []
-        if self.mode_name == 'seed':
-            # SEED = capital preservation. Block strategies with bad risk/reward.
+        if self.mode_name in ('seed', 'plant'):
+            # SEED/PLANT = capital preservation. Block strategies with bad risk/reward.
             disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer', 'oracle_arb']
         elif self.mode_name == 'concentration':
             # CONCENTRATION ($5-20): prob_closer buys at $0.90-0.95 for 5-10%

@@ -38,6 +38,7 @@ class LiveTrader:
     - FOK sell for instant exit, GTC sell as fallback
     
     Tracks pending orders and auto-cancels stale ones.
+    Logs every trade to CSV (data/trades_log.csv) for Telegram download.
     """
 
     ORDER_TIMEOUT = 60  # Cancel unfilled orders after 60 seconds (thin 5m markets need more time)
@@ -56,6 +57,9 @@ class LiveTrader:
         self._trading_paused = False
         self._pause_reason = ''
         self._init_error = ''  # Last init error for /debug
+        # ── Trade logger (CSV) ──
+        from trading.trade_logger import TradeLogger
+        self.trade_logger = TradeLogger()
         # Cached real balance (refreshed every 30s to avoid RPC spam)
         self._cached_real_balance: Optional[float] = None
         self._last_balance_check: float = 0.0
@@ -70,6 +74,8 @@ class LiveTrader:
         # ── Global post-loss throttle: brief pause after ANY stop-loss ──
         self._last_stop_loss_time: float = 0
         self.POST_LOSS_THROTTLE_SECS = 5  # 5s pause — just prevents 3s revenge trades
+        # ── Orderbook reader for smart exits (set by app.py) ──
+        self.clob_reader = None
 
     async def init(self):
         """Initialize CLOB client with credentials.
@@ -415,10 +421,14 @@ class LiveTrader:
             from eth_account import Account
             from config import Config
 
-            wallet = Account.from_key(Config.POLY_PRIVATE_KEY)
+            # Use proxy wallet (where funds live) over signer address
+            proxy = os.environ.get("POLY_PROXY_WALLET", "").strip()
+            if not proxy:
+                wallet = Account.from_key(Config.POLY_PRIVATE_KEY)
+                proxy = wallet.address
             resp = requests.get(
                 "https://data-api.polymarket.com/value",
-                params={"user": wallet.address.lower()},
+                params={"user": proxy.lower()},
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -611,8 +621,9 @@ class LiveTrader:
                           f"Auto-resume in {remaining:.0f}s", flush=True)
                 return None
 
-        can_trade, reason = self.balance_mgr.can_trade()
-        if not can_trade:
+        is_arb = signal.direction == 'BOTH' and '|' in signal.token_id
+        can_trade_ok, reason = self.balance_mgr.can_trade(is_arb=is_arb)
+        if not can_trade_ok:
             # Log WHY we can't trade (but not every single signal — throttle)
             now = time.time()
             if not hasattr(self, '_last_cant_trade_log') or now - self._last_cant_trade_log > 30:
@@ -979,6 +990,15 @@ class LiveTrader:
 
             await self.db.save_trade(trade)
             self._consecutive_failures = 0  # Reset on success
+
+            # ── Log BUY to CSV ──
+            try:
+                self.trade_logger.log_buy(
+                    trade, self.balance_mgr.balance,
+                    self.balance_mgr.mode.name, self.balance_mgr)
+            except Exception:
+                pass  # Never let logging break trading
+
             return trade
 
         except Exception as e:
@@ -1257,6 +1277,7 @@ class LiveTrader:
                 continue
 
             secs = seconds_remaining_map.get(pos.get('market_id', ''), 999)
+            pos['_seconds_remaining'] = secs  # Used by _close_position for near-expiry logic
 
             # Use per-position fee rate (not global which gets overwritten per-trade)
             pos_fee_rate = pos.get('fee_rate', self.TAKER_FEE_RATE)
@@ -1468,9 +1489,13 @@ class LiveTrader:
                               pnl: float, reason: str) -> bool:
         """Close a position by placing a sell order.
         
-        Strategy: FOK sell first (instant exit), GTC fallback if FOK fails.
-        Detects expired markets and auto-settles instead of retrying.
+        Strategy: Check orderbook first for real bids, then FOK sell at best_bid,
+        GTC fallback if FOK fails. Detects expired markets and auto-settles.
         Limits sell retries to 3 per position to avoid API spam.
+        
+        Near-expiry logic: If <15s remain, skip selling — the CLOB orderbook
+        gets deleted at market close (returns 404), so sell ALWAYS fails.
+        Better to let the market settle and auto-redeem the tokens.
         """
         import math
         pos = self.positions.get(trade_id)
@@ -1481,6 +1506,16 @@ class LiveTrader:
         if shares <= 0:
             return False
 
+        # ── Near-expiry: skip sell, let market settle ──
+        # The CLOB orderbook is deleted when the market closes (returns 404).
+        # Selling in the last ~15s wastes retries and always fails.
+        # Let the market settle to $1/$0 and auto-redeem handles the payout.
+        secs_left = pos.get('_seconds_remaining', 999)
+        if secs_left < 15 and reason in ('profit_take', 'stop_loss'):
+            print(f"⏰ <15s left for {pos['coin']} {pos['direction']} — "
+                  f"skipping sell, letting market settle", flush=True)
+            return False
+
         # ── Sell retry limiter ──
         MAX_SELL_RETRIES = 3
         sell_fails = pos.get('_sell_fails', 0)
@@ -1489,6 +1524,36 @@ class LiveTrader:
                   f"{pos['coin']} {pos['direction']}", flush=True)
             self._finalize_close(trade_id, exit_price, pnl, 'sell_failed_settle')
             return True
+
+        # ── Smart exit: check orderbook for real bids before selling ──
+        orderbook_price = None
+        bid_depth = 0
+        if self.clob_reader:
+            try:
+                book = self.clob_reader.get_orderbook(pos['token_id'])
+                if book and not book.get('_synthetic'):
+                    best_bid = book.get('best_bid', 0)
+                    bid_depth = book.get('bid_depth', 0)
+                    if best_bid > 0 and bid_depth > 0:
+                        orderbook_price = best_bid
+                    elif best_bid <= 0 or bid_depth < 0.01:
+                        # No real bids in orderbook — selling will fail
+                        # Let market settle instead of wasting retries
+                        print(f"📊 No bids for {pos['coin']} {pos['direction']} "
+                              f"(bid={best_bid:.3f}, depth=${bid_depth:.2f}) — "
+                              f"holding for settlement", flush=True)
+                        return False
+            except Exception as e:
+                err_str = str(e).lower()
+                # Orderbook 404 = market closed/expired
+                if 'does not exist' in err_str or '404' in err_str:
+                    print(f"⏰ Orderbook gone for {pos['coin']} {pos['direction']} — "
+                          f"market expired, auto-settling", flush=True)
+                    self._finalize_close(trade_id, exit_price, pnl, 'market_settled')
+                    return True
+
+        # Use orderbook best_bid if available, otherwise use exit_price
+        effective_exit = orderbook_price if orderbook_price else exit_price
 
         # ── Share sizing ──
         # FOK sell: use EXACT share count from position (never ceil — we can't
@@ -1502,14 +1567,15 @@ class LiveTrader:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import SELL
 
-            # Tick-align exit price
-            sell_price = max(0.01, min(0.99, round(exit_price * 100) / 100))
+            # Tick-align exit price — use orderbook-aware price
+            sell_price = max(0.01, min(0.99, round(effective_exit * 100) / 100))
 
             # ── Cross the spread: aggressive FOK sell pricing ──
             # In thin 5m markets, FOK at exact price has ~20% fill rate.
-            # Lowering the limit price 1-2¢ widens the set of matching bids.
+            # Lowering the limit price widens the set of matching bids.
             # Exchange fills at BEST available bid, so actual fill ≥ our limit.
-            sell_discount = min(0.02, max(0.01, round(sell_price * 0.03 * 100) / 100))
+            # Use 5% of price (min 2¢, max 4¢) — deeper for thin markets.
+            sell_discount = min(0.04, max(0.02, round(sell_price * 0.05 * 100) / 100))
             sell_price_aggressive = max(0.01, sell_price - sell_discount)
 
             # ── Refresh conditional token allowance (fire-and-forget) ──
@@ -1540,8 +1606,15 @@ class LiveTrader:
 
             # ═══ Attempt 3: GTC sell at current price (queue) ═══
             if not can_gtc_sell:
-                print(f"⚠️ FOK sell didn't fill, GTC skipped (shares={shares:.1f} < 5)", flush=True)
+                # Shares < 5: can't do GTC. If this is already retry 2+,
+                # auto-settle instead of looping forever on tiny positions.
                 pos['_sell_fails'] = sell_fails + 1
+                if pos['_sell_fails'] >= 2:
+                    print(f"⚠️ FOK failed twice, shares<5 → auto-settling "
+                          f"{pos['coin']} {pos['direction']}", flush=True)
+                    self._finalize_close(trade_id, exit_price, pnl, 'sell_failed_settle')
+                    return True
+                print(f"⚠️ FOK sell didn't fill, GTC skipped (shares={shares:.1f} < 5)", flush=True)
                 return False
             print(f"⚠️ FOK sell didn't fill — trying GTC", flush=True)
             resp2 = await self._submit_order(pos['token_id'], sell_price, sell_shares_gtc, SELL, OrderType.GTC)
@@ -1628,9 +1701,11 @@ class LiveTrader:
                         pnl: float, reason: str):
         """Finalize a closed position. Fee-aware PnL. Tracks consecutive wins/losses.
         
-        Special case — sell_failed_settle: all sell attempts failed, marking
-        position as 'settled' so we stop retrying.  Tokens are NOT actually
-        sold and USDC hasn't been received, so we do NOT credit the balance.
+        Special cases:
+        - sell_failed_settle: all sell attempts failed, tokens unredeemed.
+        - market_settled: market expired during sell attempt. We DON'T know the
+          outcome yet — tokens need auto-redeem. Treat like sell_failed_settle:
+          don't fake PnL, let auto_redeem handle the actual payout.
         The balance sync (every 60s) will pick up any real USDC once the
         outcome tokens are auto-redeemed or manually redeemed on-chain.
         """
@@ -1651,8 +1726,10 @@ class LiveTrader:
             # Global post-loss throttle: brief pause on ALL trades after stop
             self._last_stop_loss_time = time.time()
 
-        # ── sell_failed_settle: tokens unredeemed, don't inflate balance ──
-        if reason == 'sell_failed_settle':
+        # ── sell_failed_settle / market_settled: tokens unredeemed ──
+        # Don't fake PnL — we don't know the outcome until auto-redeem runs.
+        # Balance sync will pick up USDC once tokens are redeemed on-chain.
+        if reason in ('sell_failed_settle', 'market_settled'):
             pos['exit_price'] = exit_price
             pos['pnl_gross'] = pnl
             pos['pnl'] = 0        # Can't realize PnL without actually selling
@@ -1663,11 +1740,21 @@ class LiveTrader:
             pos['status'] = 'settled_unredeemed'
             self.trade_history.append(pos)
             # DON'T update balance — USDC is still locked in outcome tokens
-            print(f"⚠️ SETTLED (unsold): {pos['coin']} {pos['direction']} — "
+            label = "expired" if reason == 'market_settled' else "unsold"
+            print(f"⏰ SETTLED ({label}): {pos['coin']} {pos['direction']} — "
                   f"Entry:${pos['entry_price']:.3f} → Mkt:${exit_price:.3f} | "
-                  f"~{pos.get('shares',0):.1f} tokens unredeemed | "
-                  f"Bal stays ${self.balance_mgr.balance:.2f} (tokens need redemption)",
+                  f"~{pos.get('shares',0):.1f} tokens awaiting redemption | "
+                  f"Bal stays ${self.balance_mgr.balance:.2f}",
                   flush=True)
+
+            # ── Log SETTLE to CSV ──
+            try:
+                self.trade_logger.log_sell(
+                    pos, self.balance_mgr.balance,
+                    self.balance_mgr.mode.name, self.balance_mgr)
+            except Exception:
+                pass
+
             return
 
         # ── Normal close: position was actually sold ──
@@ -1713,6 +1800,14 @@ class LiveTrader:
               f"Gross:${pnl:+.2f} Fees:${total_fees:.2f} Net:${net_pnl:+.2f} "
               f"({gain:.1f}x) [{reason}] | "
               f"Bal:${self.balance_mgr.balance:.2f} {streak} {sizing}", flush=True)
+
+        # ── Log SELL to CSV ──
+        try:
+            self.trade_logger.log_sell(
+                pos, self.balance_mgr.balance,
+                self.balance_mgr.mode.name, self.balance_mgr)
+        except Exception:
+            pass
 
     async def cancel_all_orders(self):
         """Emergency: cancel all pending orders."""

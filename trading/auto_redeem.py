@@ -230,31 +230,54 @@ class AutoRedeemer:
             failed = 0
             total_usd = 0.0
 
-            for token_id, balance in positions.items():
+            for token_id, pos_info in positions.items():
+                # New format: pos_info is a dict with size, condition_id, neg_risk, etc.
+                if isinstance(pos_info, dict):
+                    balance = pos_info.get("size", 0)
+                    cached_condition_id = pos_info.get("condition_id", "")
+                    cached_neg_risk = pos_info.get("neg_risk", False)
+                    cached_redeemable = pos_info.get("redeemable", False)
+                    cached_title = pos_info.get("title", "")
+                else:
+                    # Legacy format (plain float) — backward compat
+                    balance = float(pos_info)
+                    cached_condition_id = ""
+                    cached_neg_risk = False
+                    cached_redeemable = False
+                    cached_title = ""
+
                 if balance <= 0:
                     continue
 
-                market_info = await self._get_market_for_token(token_id)
-                if not market_info:
-                    continue
+                # If data-api says it's redeemable AND has conditionId, skip Gamma lookup
+                if cached_redeemable and cached_condition_id:
+                    condition_id = cached_condition_id
+                    neg_risk = cached_neg_risk
+                    title = cached_title or condition_id[:16]
+                    closed = True  # data-api redeemable=True means already resolved
+                else:
+                    # Fallback: look up market via Gamma API
+                    market_info = await self._get_market_for_token(token_id)
+                    if not market_info:
+                        continue
 
-                condition_id = market_info.get("condition_id",
-                                market_info.get("conditionId", ""))
-                if not condition_id:
-                    continue
+                    condition_id = market_info.get("condition_id",
+                                    market_info.get("conditionId", ""))
+                    if not condition_id:
+                        continue
+
+                    closed = market_info.get("closed", False)
+                    resolved = market_info.get("resolved", False)
+                    if not (closed or resolved):
+                        continue
+
+                    neg_risk = market_info.get("neg_risk",
+                                market_info.get("negRisk", False))
+                    title = market_info.get("question",
+                             market_info.get("title", condition_id[:16]))
+
                 if condition_id in self._redeemed_conditions:
                     continue
-
-                # Must be resolved / closed
-                closed = market_info.get("closed", False)
-                resolved = market_info.get("resolved", False)
-                if not (closed or resolved):
-                    continue
-
-                neg_risk = market_info.get("neg_risk",
-                            market_info.get("negRisk", False))
-                title = market_info.get("question",
-                         market_info.get("title", condition_id[:16]))
 
                 print(f"💰 Auto-redeem: {title[:50]}... "
                       f"({balance:.2f} tokens, neg_risk={neg_risk})", flush=True)
@@ -284,10 +307,10 @@ class AutoRedeemer:
                 else:
                     failed += 1
                     print(f"⚠️ Redeem failed: {condition_id[:16]}...", flush=True)
-                    # Stop trying more redeems if gas/nonce issues
-                    # (avoids queuing 5 failing txs when MATIC is low)
-                    if failed >= 1:
-                        print(f"  ⛔ Stopping redeem batch after first failure "
+                    # Allow up to 3 failures before stopping batch
+                    # (one failure might be a specific market issue, not gas/nonce)
+                    if failed >= 3:
+                        print(f"  ⛔ Stopping redeem batch after {failed} failures "
                               f"(prevents tx queue buildup)", flush=True)
                         break
 
@@ -309,6 +332,10 @@ class AutoRedeemer:
 
         Queries BOTH Gamma API and data-api, merges results.
         Uses pagination to avoid missing positions.
+        
+        Returns dict: {token_id: {"size": float, "condition_id": str, "neg_risk": bool, "title": str}}
+        If data-api provides conditionId/redeemable, we use those directly
+        (skipping the slow per-token Gamma lookup in check_and_redeem).
         """
         try:
             import requests
@@ -319,7 +346,48 @@ class AutoRedeemer:
 
             positions = {}
 
-            # ── Source 1: Gamma API (with pagination) ──
+            # ── Source 1: data-api (PREFERRED — has conditionId, redeemable, negativeRisk) ──
+            try:
+                offset = 0
+                page_size = 100
+                while True:
+                    resp = requests.get(
+                        "https://data-api.polymarket.com/positions",
+                        params={
+                            "user": address.lower(),
+                            "sizeThreshold": 0,
+                            "limit": page_size,
+                            "offset": offset,
+                        },
+                        timeout=15,
+                    )
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    if not isinstance(data, list) or not data:
+                        break
+                    for pos in data:
+                        token_id = pos.get("asset", pos.get("token_id", ""))
+                        size = float(pos.get("size", pos.get("balance", 0)))
+                        if not token_id or size <= 0:
+                            continue
+                        # Store rich metadata from data-api
+                        existing = positions.get(token_id)
+                        positions[token_id] = {
+                            "size": max(size, existing["size"] if existing else 0),
+                            "condition_id": pos.get("conditionId", existing.get("condition_id", "") if existing else ""),
+                            "neg_risk": pos.get("negativeRisk", existing.get("neg_risk", False) if existing else False),
+                            "redeemable": pos.get("redeemable", existing.get("redeemable", False) if existing else False),
+                            "title": pos.get("title", existing.get("title", "") if existing else ""),
+                            "cur_price": pos.get("curPrice", existing.get("cur_price") if existing else None),
+                        }
+                    if len(data) < page_size:
+                        break
+                    offset += page_size
+            except Exception as e:
+                print(f"  ⚠️ data-api positions query: {e}", flush=True)
+
+            # ── Source 2: Gamma API (fallback — merge positions missing from data-api) ──
             try:
                 offset = 0
                 page_size = 100
@@ -341,9 +409,20 @@ class AutoRedeemer:
                     for pos in data:
                         token_id = pos.get("asset", pos.get("token_id", ""))
                         size = float(pos.get("size", pos.get("balance", 0)))
-                        if token_id and size > 0:
-                            positions[token_id] = max(
-                                positions.get(token_id, 0), size
+                        if not token_id or size <= 0:
+                            continue
+                        if token_id not in positions:
+                            positions[token_id] = {
+                                "size": size,
+                                "condition_id": "",
+                                "neg_risk": False,
+                                "redeemable": False,
+                                "title": "",
+                                "cur_price": None,
+                            }
+                        else:
+                            positions[token_id]["size"] = max(
+                                positions[token_id]["size"], size
                             )
                     if len(data) < page_size:
                         break
@@ -351,28 +430,9 @@ class AutoRedeemer:
             except Exception as e:
                 print(f"  ⚠️ Gamma positions query: {e}", flush=True)
 
-            # ── Source 2: data-api (merge, don't replace) ──
-            try:
-                resp = requests.get(
-                    "https://data-api.polymarket.com/positions",
-                    params={"user": address.lower()},
-                    timeout=15,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, list):
-                        for pos in data:
-                            token_id = pos.get("asset", pos.get("token_id", ""))
-                            size = float(pos.get("size", pos.get("balance", 0)))
-                            if token_id and size > 0:
-                                positions[token_id] = max(
-                                    positions.get(token_id, 0), size
-                                )
-            except Exception as e:
-                print(f"  ⚠️ data-api positions query: {e}", flush=True)
-
             if positions:
-                print(f"  📋 Found {len(positions)} positions with tokens",
+                redeemable_count = sum(1 for p in positions.values() if p.get("redeemable"))
+                print(f"  📋 Found {len(positions)} positions ({redeemable_count} redeemable)",
                       flush=True)
 
             return positions
