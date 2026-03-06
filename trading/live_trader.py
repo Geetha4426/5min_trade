@@ -1129,13 +1129,15 @@ class LiveTrader:
             side=side,
             token_id=token_id,
         )
+
+        # Combine sign + post into single executor call to eliminate
+        # the overhead of two separate executor dispatches (~50-200ms saved)
+        def _sign_and_post():
+            signed = self.clob_client.create_order(order_args)
+            return self.clob_client.post_order(signed, order_type)
+
         loop = asyncio.get_event_loop()
-        signed_order = await loop.run_in_executor(
-            None, self.clob_client.create_order, order_args
-        )
-        return await loop.run_in_executor(
-            None, self.clob_client.post_order, signed_order, order_type
-        )
+        return await loop.run_in_executor(None, _sign_and_post)
 
     async def check_pending_orders(self):
         """Check if pending orders have been filled, partially filled, or need cancellation."""
@@ -1466,12 +1468,9 @@ class LiveTrader:
     async def _ensure_conditional_allowance(self, token_id: str) -> bool:
         """Refresh conditional token allowance before selling.
         
-        This fires update_balance_allowance (a GET that tells the CLOB to
-        re-read on-chain state) and immediately returns True.
-        
+        Runs in executor to avoid blocking the event loop.
         On-chain setApprovalForAll is ensured at startup. The CLOB's cached
         allowance value is often stale/zero — we never block sells on it.
-        This is the same pattern poly_trade uses successfully.
         """
         try:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
@@ -1480,7 +1479,10 @@ class LiveTrader:
                 token_id=token_id,
                 signature_type=self._sig_type,
             )
-            self.clob_client.update_balance_allowance(params)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, self.clob_client.update_balance_allowance, params
+            )
         except Exception as e:
             print(f"⚠️ update_balance_allowance non-fatal: {e}", flush=True)
         return True
@@ -1555,6 +1557,14 @@ class LiveTrader:
         # Use orderbook best_bid if available, otherwise use exit_price
         effective_exit = orderbook_price if orderbook_price else exit_price
 
+        # ── Skip worthless tokens: selling at ≤$0.02 never fills ──
+        # Nobody buys a $0.01 token. Let the market settle and auto-redeem.
+        if effective_exit <= 0.02 and reason == 'stop_loss':
+            print(f"📊 Token near-worthless (${effective_exit:.3f}) — "
+                  f"holding {pos['coin']} {pos['direction']} for settlement "
+                  f"(auto-redeem will handle)", flush=True)
+            return False
+
         # ── Share sizing ──
         # FOK sell: use EXACT share count from position (never ceil — we can't
         # sell more shares than we own; ceil caused 'not enough balance' errors)
@@ -1562,6 +1572,11 @@ class LiveTrader:
         sell_shares_fok = math.floor(shares * 100) / 100 if shares > 0 else shares
         can_gtc_sell = shares >= 5  # GTC requires min 5 shares — don't even try if < 5
         sell_shares_gtc = max(5, math.ceil(shares)) if can_gtc_sell else sell_shares_fok
+
+        # ── Graduated share reduction cascade ──
+        # If full fails, try smaller fractions. Each step is a quick FOK attempt.
+        # The exchange fills at BEST bid, so we only lose unsold dust.
+        GRADUATED_FRACTIONS = [0.975, 0.95, 0.925, 0.90, 0.85, 0.80, 0.75, 0.50]
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -1578,10 +1593,10 @@ class LiveTrader:
             sell_discount = min(0.04, max(0.02, round(sell_price * 0.05 * 100) / 100))
             sell_price_aggressive = max(0.01, sell_price - sell_discount)
 
-            # ── Refresh conditional token allowance (fire-and-forget) ──
-            await self._ensure_conditional_allowance(pos['token_id'])
+            # ── Refresh conditional token allowance (fire-and-forget, non-blocking) ──
+            asyncio.ensure_future(self._ensure_conditional_allowance(pos['token_id']))
 
-            # ═══ Attempt 1: FOK sell with spread-crossing price ═══
+            # ═══ Attempt 1: FOK sell at full shares ═══
             print(f"📤 [FOK] SELL: {pos['coin']} {pos['direction']} | "
                   f"{sell_shares_fok} shares @ ${sell_price_aggressive:.3f} "
                   f"(cross spread, base ${sell_price:.3f}) [{reason}] "
@@ -1594,29 +1609,42 @@ class LiveTrader:
                 self._finalize_close(trade_id, exit_price, pnl, reason)
                 return True
 
-            # ═══ Attempt 2: FOK with slightly fewer shares (rounding safety) ═══
-            reduced_shares = math.floor(sell_shares_fok * 0.95 * 100) / 100
-            if reduced_shares >= 0.01 and reduced_shares != sell_shares_fok:
-                print(f"⚠️ FOK full failed — retrying with {reduced_shares} shares (95%)", flush=True)
-                resp_reduced = await self._submit_order(pos['token_id'], sell_price_aggressive, reduced_shares, SELL, OrderType.FOK)
-                if resp_reduced and resp_reduced.get('status') != 'error':
-                    print(f"✅ [FOK] SELL FILLED with reduced shares", flush=True)
-                    self._finalize_close(trade_id, exit_price, pnl, reason)
-                    return True
+            # ═══ Graduated FOK cascade: try decreasing share amounts ═══
+            for frac in GRADUATED_FRACTIONS:
+                reduced = math.floor(sell_shares_fok * frac * 100) / 100
+                if reduced < 0.01 or reduced == sell_shares_fok:
+                    continue
+                try:
+                    resp_r = await self._submit_order(
+                        pos['token_id'], sell_price_aggressive, reduced, SELL, OrderType.FOK
+                    )
+                    if resp_r and resp_r.get('status') != 'error':
+                        print(f"✅ [FOK] SELL FILLED at {frac*100:.1f}% ({reduced} shares)", flush=True)
+                        self._finalize_close(trade_id, exit_price, pnl, reason)
+                        return True
+                except Exception as grad_e:
+                    err_s = str(grad_e).lower()
+                    if 'not enough balance' in err_s or 'allowance' in err_s:
+                        continue  # Try smaller amount
+                    if 'not fill' in err_s or 'fully filled' in err_s:
+                        break  # No liquidity — stop trying FOK
+                    if 'does not exist' in err_s:
+                        self._finalize_close(trade_id, exit_price, pnl, 'market_settled')
+                        return True
+                    break  # Unknown error — fall through to GTC
 
-            # ═══ Attempt 3: GTC sell at current price (queue) ═══
+            # ═══ GTC fallback: queue in orderbook ═══
             if not can_gtc_sell:
-                # Shares < 5: can't do GTC. If this is already retry 2+,
-                # auto-settle instead of looping forever on tiny positions.
                 pos['_sell_fails'] = sell_fails + 1
                 if pos['_sell_fails'] >= 2:
-                    print(f"⚠️ FOK failed twice, shares<5 → auto-settling "
+                    print(f"⚠️ FOK cascade failed, shares<5 → auto-settling "
                           f"{pos['coin']} {pos['direction']}", flush=True)
                     self._finalize_close(trade_id, exit_price, pnl, 'sell_failed_settle')
                     return True
-                print(f"⚠️ FOK sell didn't fill, GTC skipped (shares={shares:.1f} < 5)", flush=True)
+                print(f"⚠️ FOK cascade didn't fill, GTC skipped (shares={shares:.1f} < 5)", flush=True)
                 return False
-            print(f"⚠️ FOK sell didn't fill — trying GTC", flush=True)
+
+            print(f"⚠️ FOK cascade didn't fill — trying GTC", flush=True)
             resp2 = await self._submit_order(pos['token_id'], sell_price, sell_shares_gtc, SELL, OrderType.GTC)
 
             if resp2 and resp2.get('status') != 'error':
@@ -1630,7 +1658,7 @@ class LiveTrader:
                 print(f"📋 GTC SELL queued: {sell_order_id} — will confirm fill later", flush=True)
                 return True
 
-            # ═══ Attempt 4: GTC sell 1¢ lower ═══
+            # ═══ GTC 1¢ lower ═══
             print(f"⚠️ GTC sell didn't fill — trying 1¢ lower", flush=True)
             retry_price = max(0.01, sell_price - 0.01)
             resp3 = await self._submit_order(pos['token_id'], retry_price, sell_shares_gtc, SELL, OrderType.GTC)
@@ -1673,23 +1701,27 @@ class LiveTrader:
                 except Exception as retry_e:
                     print(f"❌ Min-size retry also failed: {retry_e}", flush=True)
 
-            # ── Handle balance/allowance errors: retry with 95% shares ──
-            # CLOB sometimes reports fewer shares than we have (rounding).
-            # A 95% reduced FOK often succeeds when the full amount fails.
+            # ── Handle balance/allowance errors: graduated FOK cascade ──
             if 'not enough balance' in error_str or 'allowance' in error_str:
-                reduced = math.floor(sell_shares_fok * 0.95 * 100) / 100
-                if reduced >= 0.01:
-                    print(f"🔄 Balance/allowance error — retrying FOK with {reduced} shares (95%)...", flush=True)
+                for frac in GRADUATED_FRACTIONS:
+                    reduced = math.floor(sell_shares_fok * frac * 100) / 100
+                    if reduced < 0.01:
+                        break
+                    print(f"🔄 Balance/allowance error — retrying FOK with {reduced} shares ({frac*100:.1f}%)...", flush=True)
                     try:
                         retry_resp = await self._submit_order(
                             pos['token_id'], sell_price_aggressive, reduced, SELL, OrderType.FOK
                         )
                         if retry_resp and retry_resp.get('status') != 'error':
-                            print(f"✅ Reduced-share sell succeeded!", flush=True)
+                            print(f"✅ Reduced-share sell succeeded at {frac*100:.1f}%!", flush=True)
                             self._finalize_close(trade_id, exit_price, pnl, reason)
                             return True
                     except Exception as retry_e:
-                        print(f"❌ Reduced-share retry also failed: {retry_e}", flush=True)
+                        retry_err_s = str(retry_e).lower()
+                        if 'not enough balance' in retry_err_s or 'allowance' in retry_err_s:
+                            continue  # Try even smaller
+                        print(f"❌ Reduced-share retry failed: {retry_e}", flush=True)
+                        break  # Different error — stop cascade
 
             # General sell error — count it and move on
             pos['_sell_fails'] = sell_fails + 1
