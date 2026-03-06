@@ -1,0 +1,217 @@
+﻿Starting Container
+ðŸŒ No proxy configured (PROXY_URL not set)
+
+============================================================
+âš¡ 5MIN_TRADE â€” Polymarket Crypto Scalper
+============================================================
+Mode: ðŸ”´ LIVE
+Coins: BTC, ETH, SOL
+Timeframes: [5, 15]
+Telegram: âœ…
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ðŸ” LIVE TRADING CONFIG:
+  Private Key: âœ… set
+  Wallet: 0x871faC...244F
+  Funder: 0x4f9fBe...CFC4
+  Proxy Wallet: 0x4f9fBe...CFC4
+  API Creds: ðŸ”‘ auto-derive from key
+  Sig Type: 2 (Proxy)
+ðŸ”€ CLOB Relay: âŒ Direct (may be geo-blocked)
+ðŸ’° Auto-Redeem: âŒ disabled (set POLY_BUILDER_* env vars)
+Balance: $3.00
+============================================================
+
+âœ… Database initialized
+âš ï¸ Website geo-blocked: IP 208.77.244.170 | NL | NH
+   â„¹ï¸ NOTE: This checks the Polymarket WEBSITE, not the CLOB API.
+   The CLOB API (clob.polymarket.com) works independently from most regions.
+   EU-West Railway works fine for trading â€” poly_trade proved this.
+ðŸ”‘ Initializing CLOB client...
+  Host: https://clob.polymarket.com
+  Chain: 137
+  Sig type: 2 (Proxy)
+  Funder: 0x4f9fBe...CFC4
+ðŸ”‘ Auto-deriving API credentials from private key...
+âœ… API credentials derived successfully
+  â„¹ï¸  POLY_API_KEY/SECRET/PASSPHRASE are NOT needed â€” they are auto-derived!
+ðŸŸ¢ CLOB connection: OK
+âœ… CTF approval (Normal exchange): approved
+âœ… CTF approval (NegRisk exchange): approved
+ðŸ§¹ Startup cleanup: no stale orders found
+âœ… Live trader initialized successfully
+ðŸŸ¢ Live trader ready â€” Mode: ðŸŽ¯ CONCENTRATION
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+  ðŸ“Š proxy [USDC.e]: $7.964909
+  ðŸ“Š proxy [USDC]: $0.000000
+ðŸ’° Auto-redeemer ready (direct) â€” will auto-redeem resolved positions
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $7.96
+ðŸ’° Balance synced: $7.96 (real)
+âœ… Auto-redeem: direct on-chain (Safe) via https://polygon-mainnet.g.alchemy.com/v2/***
+âœ… All components initialized â€” Mode: LIVE
+ðŸ¤– Starting Telegram bot...
+âœ… Bot initialized
+âœ… Telegram bot is polling!
+âœ… Startup message sent to Telegram
+
+ðŸ’¡ Bot is ready! Send /trade in Telegram to start trading.
+
+ðŸ”‘ Checking CTF exchange approvals...
+âœ… CTF approval (Normal): approved
+âœ… CTF approval (NegRisk): approved
+Error while getting Updates: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Exception happened while polling for updates.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_updater.py", line 688, in _network_loop_retry
+    if not await action_cb():
+           ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_updater.py", line 384, in polling_action_cb
+    raise exc
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_updater.py", line 373, in polling_action_cb
+    updates = await self.bot.get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_extbot.py", line 558, in get_updates
+    updates = await super().get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 525, in decorator
+    result = await func(self, *args, **kwargs)  # skipcq: PYL-E1102
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 3584, in get_updates
+    await self._post(
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 613, in _post
+    return await self._do_post(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_extbot.py", line 340, in _do_post
+    return await super()._do_post(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 641, in _do_post
+    return await request.post(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 200, in post
+    result = await self._request_wrapper(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 381, in _request_wrapper
+    raise Conflict(message)
+telegram.error.Conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+ðŸ’° Auto-redeem: T20 World Cup: England vs New Zealand... (1.43 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: f23498c31e7b089d912df0e9ef6266d7e70a4c58711f1afa0a757885765f502a
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+  ðŸ“Š proxy [USDC.e]: $7.964909
+  ðŸ“Š proxy [USDC]: $0.000000
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $7.96
+ðŸ“Š RISK MODE: CONCENTRATION â†’ ðŸŒ± SEED
+â–¶ï¸ Trading started â€” Strategy: dynamic | Timeframes: [5, 15, 30]
+ðŸŽ¯ Direct slug lookup: found 12 events (btc-updown-5m-1772392500, eth-updown-15m-1772392500, eth-updown-5m-1772392500)
+ðŸ”¬ Sample market fields: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active']
+   tokens: 0 | clobTokenIds: True | outcomePrices: True
+ðŸ”¬ RAW PARSE DEBUG:
+   all keys: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active', 'closed', 'marketMakerAddress', 'createdAt', 'updatedAt', 'new', 'featured', 'archived', 'restricted', 'groupItemThreshold', 'questionID', 'enableOrderBook', 'orderPriceMinTickSize', 'orderMinSize', 'volumeNum', 'liquidityNum', 'endDateIso', 'startDateIso', 'hasReviewedDates', 'volume24hr', 'volume1wk', 'volume1mo', 'volume1yr', 'clobTokenIds', 'volume24hrClob', 'volume1wkClob', 'volume1moClob', 'volume1yrClob', 'volumeClob', 'liquidityClob', 'makerBaseFee', 'takerBaseFee', 'acceptingOrders', 'negRisk', 'ready', 'funded', 'acceptingOrdersTimestamp', 'cyom', 'competitive', 'pagerDutyNotificationEnabled', 'approved', 'rewardsMinSize', 'rewardsMaxSpread', 'spread', 'lastTradePrice', 'bestBid', 'bestAsk', 'automaticallyActive', 'clearBookOnStart', 'showGmpSeries', 'showGmpOutcome', 'manualActivation', 'negRiskOther', 'umaResolutionStatuses', 'pendingDeployment', 'deploying', 'rfqEnabled', 'eventStartTime', 'holdingRewardsEnabled', 'feesEnabled', 'requiresTranslation', 'makerRebatesFeeShareBps', 'feeType']
+   clobTokenIds type=str val=["73390877656290714245281492519287212808663062989788920332894216320479646915530", "4341566250910266254514330641901213417
+   outcomes type=str val=["Up", "Down"]
+   outcomePrices type=str val=["0.505", "0.495"]
+   tokens count=0
+ðŸ“¡ Found 12 crypto markets (12 with token IDs): {'BTC', 'ETH', 'SOL'} Ã— {5, 15}min
+ðŸ”Œ Subscribing to 24 token feeds
+ðŸ”„ Continuous scan loop started
+ðŸ“Š [ðŸŒ± SEED] Balance: $7.96 | Enabled: all | Markets: 12
+ðŸ” Scan #1: 6/12 active markets scanned
+ðŸ”Œ Polymarket WS connected
+   Subscribed to 24 tokens
+ðŸ“¨ First WS msg: [{"market":"0x98a6e678af06a1a44082b2812f80c7b45341d2d136d11eb3751efdbb9beb3b68","asset_id":"68729463143250844710686326029967669622208970813045762639994115038295046299845","timestamp":"1772392754609","
+ðŸ”Œ Binance WS connected (BTC, ETH, SOL)
+ðŸ” Scan #2: 6/12 active markets scanned
+ðŸ” Scan #3: 6/12 active markets scanned
+âš ï¸ Polymarket WS disconnected, reconnecting in 3s...
+ðŸŽ¯ [ðŸ”´LIVE] Signal: time_decay -> BTC DOWN @ 0.6800 (conf=95%)
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+  ðŸ“Š proxy [USDC.e]: $7.964909
+  ðŸ“Š proxy [USDC]: $0.000000
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $7.96
+>> [FOK] BTC DOWN | $3.23 @ $0.680 (4.8 shares) [fee~1.18%]
+âœ… [FOK] ORDER FILLED: 0xf36bdfbbd425b32c7a828cfac01d43ce9e67db84109c89a1aee9d60d6c24e056
+âœ… Trade executed: BTC DOWN
+ðŸ” Scan #4: 6/12 active markets scanned
+ðŸ”Œ Polymarket WS connected
+   Subscribed to 24 tokens
+ðŸŽ¯ Direct slug lookup: found 12 events (btc-updown-5m-1772392500, eth-updown-15m-1772392500, eth-updown-5m-1772392500)
+ðŸ”¬ Sample market fields: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active']
+   tokens: 0 | clobTokenIds: True | outcomePrices: True
+ðŸ“¡ Found 12 crypto markets (12 with token IDs): {'BTC', 'ETH', 'SOL'} Ã— {5, 15}min
+ðŸŽ¯ [ðŸ”´LIVE] Signal: time_decay -> BTC DOWN @ 0.5900 (conf=95%)
+âš ï¸ DRAWDOWN ALERT: 40.6% from peak $7.96 â†’ $4.73
+â›” Can't trade: ðŸ“Š 1/1 positions open | Balance: $4.73 | Signal: BTC DOWN @ 0.590
+ðŸ” Scan #5: 6/12 active markets scanned
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 1)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 2)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 3)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+â›” Skipping sell â€” allowance/balance check failed (2 retries left)
+ðŸŽ¯ [ðŸ”´LIVE] Signal: time_decay -> BTC DOWN @ 0.7500 (conf=94%)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 1)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 2)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 3)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+â›” Skipping sell â€” allowance/balance check failed (1 retries left)
+ðŸŽ¯ Direct slug lookup: found 12 events (btc-updown-5m-1772392500, eth-updown-15m-1772392500, eth-updown-5m-1772392500)
+ðŸ”¬ Sample market fields: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active']
+   tokens: 0 | clobTokenIds: True | outcomePrices: True
+ðŸ“¡ Found 12 crypto markets (12 with token IDs): {'BTC', 'ETH', 'SOL'} Ã— {5, 15}min
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 1)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 2)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+ðŸ” Token check: balance=4.8323 allowance=0.0000 (attempt 3)
+âš ï¸ CLOB says allowance=0 â€” CTF exchange may not be approved!
+   Fix: go to polymarket.com and sell ANY position manually (sets approval)
+â›” Skipping sell â€” allowance/balance check failed (0 retries left)
+âš ï¸ SETTLED (unsold): BTC DOWN â€” Entry:$0.680 â†’ Mkt:$1.000 | ~4.8 tokens unredeemed | Bal stays $4.73 (tokens need redemption)
+â° Max sell retries (3) reached â€” auto-settling BTC DOWN
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+  ðŸ“Š proxy [USDC.e]: $4.734910
+  ðŸ“Š proxy [USDC]: $0.000000
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $4.73
+ðŸŽ¯ Direct slug lookup: found 12 events (btc-updown-5m-1772392500, eth-updown-15m-1772392500, sol-updown-5m-1772392800)
+ðŸ”¬ Sample market fields: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active']
+   tokens: 0 | clobTokenIds: True | outcomePrices: True
+ðŸ“¡ Found 12 crypto markets (12 with token IDs): {'BTC', 'ETH', 'SOL'} Ã— {5, 15}min
+ðŸ’° Auto-redeem: T20 World Cup: England vs New Zealand... (1.43 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: e7548710d463f974de5562e3035fc3bc7788b98e16c507eb1de876d7c1e6781e
+ðŸŽ¯ Direct slug lookup: found 12 events (btc-updown-5m-1772392500, eth-updown-15m-1772392500, sol-updown-5m-1772392800)
+ðŸ”¬ Sample market fields: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active']
+   tokens: 0 | clobTokenIds: True | outcomePrices: True
+ðŸ“¡ Found 12 crypto markets (12 with token IDs): {'BTC', 'ETH', 'SOL'} Ã— {5, 15}min
+ðŸ”Œ Subscribing to 24 token feeds
+ðŸ”Œ Polymarket WS connected
+   Subscribed to 24 tokens
+ðŸ“¨ First WS msg: [{"market":"0x50080f7f264194010445e5a8f74595f2c805a61ec1cd53ebdfea5139a7b0a0cc","asset_id":"1889552775901442871158751394054279984173713506835774736397409180490999638536","timestamp":"1772392831248","h
+  â³ Primary RPC timeout (180s), trying fallbacks...
+  âš ï¸ Redeem: tx sent but receipt unconfirmed (may still land on-chain)
+âš ï¸ Redeem failed: 0xf0626641050503...
+ðŸ’° No resolved positions to redeem at startup
+ðŸŽ¯ Direct slug lookup: found 12 events (btc-updown-5m-1772392500, eth-updown-15m-1772392500, sol-updown-5m-1772392800)
+ðŸ”¬ Sample market fields: ['id', 'question', 'conditionId', 'slug', 'resolutionSource', 'endDate', 'liquidity', 'startDate', 'image', 'icon', 'description', 'outcomes', 'outcomePrices', 'volume', 'active']
+   tokens: 0 | clobTokenIds: True | outcomePrices: True
+ðŸ“¡ Found 12 crypto markets (12 with token IDs): {'BTC', 'ETH', 'SOL'} Ã— {5, 15}min
+ðŸ”Œ Subscribing to 24 token feeds
+ðŸ”Œ Polymarket WS connected
+   Subscribed to 24 tokens
+ðŸ“¨ First WS msg: [{"market":"0x29c2c731566ef830a81bb13ea8bcdcc582573cb8425ce22dadd6ed0e29b79aa4","asset_id":"9163478269545967829997539502806745034677287378112736259851850965550564970646","timestamp":"1772392892154","h

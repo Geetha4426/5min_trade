@@ -409,7 +409,7 @@ class TradingEngine:
                         'poly_feed': self.poly_feed,
                         'binance_feed': self.binance_feed,
                         'seconds_remaining': seconds_remaining,
-                        'balance_mgr': self.trader.balance_mgr if self.trader else None,
+                        'balance_mgr': self.live_balance_mgr if self.trading_mode == 'live' else None,
                     }
 
                     # Dynamic picker gets balance preferences

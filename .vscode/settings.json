@@ -1,0 +1,18 @@
+{
+  "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+  "github.copilot.chat.codeGeneration.instructions": [
+    {
+      "text": "Always use Claude Opus 4.6 as the primary model for all coding, debugging, reasoning, and implementation tasks. Never downgrade model for code-related work."
+    }
+  ],
+  "github.copilot.chat.reviewSelection.instructions": [
+    {
+      "text": "Use Claude Opus 4.6 for all code reviews. Be thorough — check for bugs, security issues, and logic errors."
+    }
+  ],
+  "github.copilot.chat.testGeneration.instructions": [
+    {
+      "text": "Use Claude Opus 4.6 for test generation. Generate comprehensive tests covering edge cases."
+    }
+  ]
+}

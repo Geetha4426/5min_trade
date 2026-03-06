@@ -1,0 +1,98 @@
+﻿ðŸŒ No proxy configured (PROXY_URL not set)
+
+============================================================
+âš¡ 5MIN_TRADE â€” Polymarket Crypto Scalper
+============================================================
+Mode: ðŸ”´ LIVE
+Coins: BTC, ETH, SOL
+Timeframes: [5, 15]
+Telegram: âœ…
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ðŸ” LIVE TRADING CONFIG:
+  Private Key: âœ… set
+  Wallet: 0x871faC...244F
+
+  Funder: 0x4f9fBe...CFC4
+âœ… Database initialized
+  Proxy Wallet: 0x4f9fBe...CFC4
+âš ï¸ Website geo-blocked: IP 208.77.244.164 | NL | NH
+  API Creds: ðŸ”‘ auto-derive from key
+   â„¹ï¸ NOTE: This checks the Polymarket WEBSITE, not the CLOB API.
+  Sig Type: 2 (Proxy)
+ðŸ”€ CLOB Relay: âŒ Direct (may be geo-blocked)
+ðŸ’° Auto-Redeem: âŒ disabled (set POLY_BUILDER_* env vars)
+Balance: $3.00
+============================================================
+  â„¹ï¸  POLY_API_KEY/SECRET/PASSPHRASE are NOT needed â€” they are auto-derived!
+ðŸŸ¢ CLOB connection: OK
+âœ… CTF approval (Normal exchange): approved
+âœ… CTF approval (NegRisk exchange): approved
+   The CLOB API (clob.polymarket.com) works independently from most regions.
+   EU-West Railway works fine for trading â€” poly_trade proved this.
+ðŸ”‘ Initializing CLOB client...
+  Host: https://clob.polymarket.com
+  Chain: 137
+  Sig type: 2 (Proxy)
+  Funder: 0x4f9fBe...CFC4
+ðŸ”‘ Auto-deriving API credentials from private key...
+âœ… API credentials derived successfully
+ðŸ§¹ Startup cleanup: no stale orders found
+âœ… Live trader initialized successfully
+ðŸŸ¢ Live trader ready â€” Mode: ðŸŽ¯ CONCENTRATION
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+Starting Container
+  ðŸ“Š proxy [USDC.e]: $5.987709
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $5.99
+ðŸ’° Balance synced: $5.99 (real)
+  ðŸ“Š proxy [USDC]: $0.000000
+âœ… Auto-redeem: direct on-chain (Safe) via https://polygon-mainnet.g.alchemy.com/v2/xOozJIikT
+ðŸ’° Auto-redeemer ready (direct) â€” will auto-redeem resolved positions
+âœ… All components initialized â€” Mode: LIVE
+ðŸ¤– Starting Telegram bot...
+âœ… Bot initialized
+âœ… Telegram bot is polling!
+âœ… Startup message sent to Telegram
+
+ðŸ’¡ Bot is ready! Send /trade in Telegram to start trading.
+
+ðŸ”‘ Checking CTF exchange approvals...
+âœ… CTF approval (Normal): approved
+âœ… CTF approval (NegRisk): approved
+Error while getting Updates: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Exception happened while polling for updates.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_updater.py", line 688, in _network_loop_retry
+    if not await action_cb():
+           ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_updater.py", line 384, in polling_action_cb
+    raise exc
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_updater.py", line 373, in polling_action_cb
+    updates = await self.bot.get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_extbot.py", line 558, in get_updates
+    updates = await super().get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 525, in decorator
+    result = await func(self, *args, **kwargs)  # skipcq: PYL-E1102
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 3584, in get_updates
+    await self._post(
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 613, in _post
+    return await self._do_post(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/ext/_extbot.py", line 340, in _do_post
+    return await super()._do_post(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/_bot.py", line 641, in _do_post
+    return await request.post(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 200, in post
+    result = await self._request_wrapper(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 381, in _request_wrapper
+    raise Conflict(message)
+telegram.error.Conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+ðŸ’° Auto-redeem: Ethereum Up or Down - March 1, 1:35PM-1:40PM ET... (1.98 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: 6a8aba3f3e63e68c8bcb0ea7fca60126a245e0eb1ed4a380decde2795f248017

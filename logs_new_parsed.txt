@@ -1,0 +1,247 @@
+﻿Coins: BTC, ETH, SOL
+Timeframes: [5, 15]
+Telegram: âœ…
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ðŸ” LIVE TRADING CONFIG:
+  Private Key: âœ… set
+  Wallet: 0x871faC...244F
+  Funder: 0x4f9fBe...CFC4
+  Proxy Wallet: 0x4f9fBe...CFC4
+  API Creds: ðŸ”‘ auto-derive from key
+  Sig Type: 2 (Proxy)
+ðŸ”€ CLOB Relay: âŒ Direct (may be geo-blocked)
+ðŸ’° Auto-Redeem: âŒ disabled (set POLY_BUILDER_* env vars)
+Balance: $3.00
+============================================================
+
+âœ… Database initialized
+âš ï¸ Website geo-blocked: IP 34.91.71.53 | NL | GR
+   â„¹ï¸ NOTE: This checks the Polymarket WEBSITE, not the CLOB API.
+ðŸŒ No proxy configured (PROXY_URL not set)
+
+============================================================
+âš¡ 5MIN_TRADE â€” Polymarket Crypto Scalper
+============================================================
+Mode: ðŸ”´ LIVE
+   The CLOB API (clob.polymarket.com) works independently from most regions.
+   EU-West Railway works fine for trading â€” poly_trade proved this.
+ðŸ”‘ Initializing CLOB client...
+  Host: https://clob.polymarket.com
+  Chain: 137
+  Sig type: 2 (Proxy)
+  Funder: 0x4f9fBe...CFC4
+ðŸ”‘ Auto-deriving API credentials from private key...
+âœ… API credentials derived successfully
+  â„¹ï¸  POLY_API_KEY/SECRET/PASSPHRASE are NOT needed â€” they are auto-derived!
+ðŸŸ¢ CLOB connection: OK
+Starting Container
+âœ… CTF approval (Normal exchange): approved
+âœ… CTF approval (NegRisk exchange): approved
+ðŸ§¹ Startup cleanup: no stale orders found
+âœ… Live trader initialized successfully
+ðŸŸ¢ Live trader ready â€” Mode: ðŸŽ¯ CONCENTRATION
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+  ðŸ“Š proxy [USDC.e]: $0.401009
+  ðŸ“Š proxy [USDC]: $0.000000
+   3. Manually claim resolved positions on polymarket.com
+============================================================
+
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $0.40
+ðŸ’° Balance synced: $0.40 (real)
+ðŸ“Š RISK MODE: CONCENTRATION â†’ ðŸŒ± SEED
+ðŸ“‰ AUTO-DEMOTE: CONCENTRATION â†’ ðŸŒ± SEED
+Balance $0.40 < $5.00 threshold
+
+============================================================
+âš ï¸  BALANCE TOO LOW: $0.40 < $1.00 minimum
+   Signals will fire but NO trades can execute.
+   Options:
+   1. Deposit USDC at https://polymarket.com
+   2. Wait for auto-redeem to claim resolved positions
+ðŸ¤– Starting Telegram bot...
+âœ… Bot initialized
+âœ… Telegram bot is polling!
+âœ… Startup message sent to Telegram
+
+ðŸ’¡ Bot is ready! Send /trade in Telegram to start trading.
+
+ðŸ”‘ Checking CTF exchange approvals...
+âœ… CTF approval (Normal): approved
+âœ… CTF approval (NegRisk): approved
+ðŸ’° Auto-redeem: T20 World Cup: India vs Zimbabwe... (500.00 tokens, neg_risk=False)
+âœ… Auto-redeem: direct on-chain (Safe) via https://1rpc.io/matic
+ðŸ’° Auto-redeemer ready (direct) â€” will auto-redeem resolved positions
+âœ… All components initialized â€” Mode: LIVE
+  ðŸ“¨ Redeem: bc17951a044a7b94bb915193ec521f8b06268424d7007a0cfd6800238b558008
+  âœ… Redeem confirmed (gas: 129706, block 83635345)
+âœ… Redeemed! Session total: 1 (~$500.00)
+ðŸ’° Auto-redeem: Bitcoin Up or Down - February 23, 5:00AM-5:15AM ET... (6.80 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: 00ac9e29c4963a26cf81f2fc19037c9c1fecf78457ed08c2c8a98687c540c4be
+  âœ… Redeem confirmed (gas: 122516, block 83635347)
+âœ… Redeemed! Session total: 2 (~$506.80)
+ðŸ’° Auto-redeem: Bitcoin Up or Down - February 23, 7:45AM-7:50AM ET... (4.93 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: 1cce7114bc4ade3095d1211242bbd716ff36cc22f3c83c93a5c23f6bf842f8cd
+  âœ… Redeem confirmed (gas: 122565, block 83635350)
+âœ… Redeemed! Session total: 3 (~$511.73)
+ðŸ’° Auto-redeem: Solana Up or Down - February 23, 8:30AM-8:35AM ET... (4.93 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: f5b97add88a05bb800d58617e855f7a607851bde35da0fd35b2c6dc59a197684
+  âœ… Redeem confirmed (gas: 122528, block 83635352)
+âœ… Redeemed! Session total: 4 (~$516.66)
+ðŸ’° Auto-redeem: Ethereum Up or Down - March 1, 1:25PM-1:30PM ET... (3.45 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: 94ecda765ca5ac8d044b2c44c38c933ded75ae24c7375ddabe246af690765a6f
+  âœ… Redeem confirmed (gas: 150382, block 83635354)
+âœ… Redeemed! Session total: 5 (~$520.10)
+ðŸ’° Auto-redeem: Solana Up or Down - March 1, 1:30PM-1:35PM ET... (2.13 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: 1c9c630d72518bc7758a7653aa40f78880d88226809d3224e3eef2983122edc3
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/http/client.py", line 1395, in getresponse
+    response.begin()
+  File "/usr/local/lib/python3.11/http/client.py", line 325, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/http/client.py", line 294, in _read_status
+    raise RemoteDisconnected("Remote end closed connection without"
+http.client.RemoteDisconnected: Remote end closed connection without response
+
+During handling of the above exception, another exception occurred:
+  âŒ Redeem error: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connectionpool.py", line 787, in urlopen
+
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/requests/adapters.py", line 486, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/util/retry.py", line 490, in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/util/util.py", line 38, in reraise
+    raise value.with_traceback(tb)
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/http/client.py", line 1395, in getresponse
+    response.begin()
+  File "/usr/local/lib/python3.11/http/client.py", line 325, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/http/client.py", line 294, in _read_status
+    raise RemoteDisconnected("Remote end closed connection without"
+urllib3.exceptions.ProtocolError: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/app/trading/auto_redeem.py", line 502, in _execute_via_safe
+    receipt = await loop.run_in_executor(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/trading/auto_redeem.py", line 504, in <lambda>
+    lambda: w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/eth/eth.py", line 503, in wait_for_transaction_receipt
+    tx_receipt = self._transaction_receipt(transaction_hash)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/module.py", line 112, in caller
+    result = w3.manager.request_blocking(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/manager.py", line 232, in request_blocking
+    response = self._make_request(method, params)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/manager.py", line 163, in _make_request
+    return request_func(method, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/middleware/base.py", line 56, in middleware
+    return self.response_processor(method, make_request(method, params))
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/middleware/base.py", line 56, in middleware
+    return self.response_processor(method, make_request(method, params))
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/middleware/base.py", line 56, in middleware
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    return self.response_processor(method, make_request(method, params))
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/_utils/http_session_manager.py", line 152, in make_post_request
+    with self.get_response_from_post_request(
+  [Previous line repeated 2 more times]
+  File "/usr/local/lib/python3.11/site-packages/web3/_utils/caching/caching_utils.py", line 261, in wrapper
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    return func(provider, method, params)
+  File "/usr/local/lib/python3.11/site-packages/web3/_utils/http_session_manager.py", line 134, in get_response_from_post_request
+    return session.post(endpoint_uri, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/providers/rpc/rpc.py", line 166, in make_request
+    raw_response = self._make_request(method, request_data)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/providers/rpc/rpc.py", line 143, in _make_request
+    return self._request_session_manager.make_post_request(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/sessions.py", line 637, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/adapters.py", line 501, in send
+    raise ConnectionError(err, request=request)
+requests.exceptions.ConnectionError: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+âš ï¸ Redeem failed: 0x0cf3433e20f24a...
+ðŸ’° Auto-redeem: T20 World Cup: England vs New Zealand... (1.43 tokens, neg_risk=False)
+  ðŸ“¨ Redeem: e3a8e8966e873890f9b843cbc03ace60a183f72e246d671aea965eee73be5d0d
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/web3/eth/eth.py", line 508, in wait_for_transaction_receipt
+    _timeout.sleep(poll_latency)
+  File "/usr/local/lib/python3.11/site-packages/web3/_utils/threads.py", line 101, in sleep
+    self.check()
+  File "/usr/local/lib/python3.11/site-packages/web3/_utils/threads.py", line 94, in check
+    raise self
+web3._utils.threads.Timeout: 90 seconds
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/app/trading/auto_redeem.py", line 502, in _execute_via_safe
+    receipt = await loop.run_in_executor(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/trading/auto_redeem.py", line 504, in <lambda>
+    lambda: w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+  âŒ Redeem error: Transaction HexBytes('0xe3a8e8966e873890f9b843cbc03ace60a183f72e246d671aea965eee73be5d0d') is not in the chain after 90 seconds
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/web3/eth/eth.py", line 512, in wait_for_transaction_receipt
+    raise TimeExhausted(
+web3.exceptions.TimeExhausted: Transaction HexBytes('0xe3a8e8966e873890f9b843cbc03ace60a183f72e246d671aea965eee73be5d0d') is not in the chain after 90 seconds
+âš ï¸ Redeem failed: 0xf0626641050503...
+ðŸ’° Startup redeem: 5 positions â†’ $520.10 USDC
+ðŸ” Checking on-chain USDC: proxy=0x4f9fBe93..., wallet=0x871faC3E...
+  ðŸ“Š proxy [USDC.e]: $5.987709
+  ðŸ“Š proxy [USDC]: $0.000000
+  ðŸ“Š wallet [USDC.e]: $0.000000
+  ðŸ“Š wallet [USDC]: $0.000000
+ðŸ’° Total on-chain USDC: $5.99
+ðŸ’° Balance re-synced: $5.99
