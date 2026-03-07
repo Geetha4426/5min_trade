@@ -473,6 +473,12 @@ class TradingEngine:
                     if strat_name and hasattr(self.dynamic_picker, 'tracker'):
                         self.dynamic_picker.tracker.record(strat_name, pnl > 0, pnl)
 
+                # ── Cleanup stale positions from resolved 5-min markets ──
+                if self.trading_mode == 'live' and hasattr(self.live_trader, 'cleanup_stale_positions'):
+                    cleaned = self.live_trader.cleanup_stale_positions()
+                    if cleaned > 0:
+                        print(f"🧹 Cleaned {cleaned} stale positions (resolved markets)", flush=True)
+
                 # ── Periodic balance sync (every 60s) ──
                 # Picks up USDC from Polymarket auto-settlements, deposits, etc.
                 # Without this, bot stays stuck at $0 until restart
@@ -514,6 +520,11 @@ class TradingEngine:
                             real_bal = await self.live_trader.fetch_balance()
                             if real_bal is not None:
                                 self.live_balance_mgr.update_balance(real_bal)
+                            # Clean up stale position tracking that auto-redeem just settled
+                            cleaned = self.live_trader.cleanup_stale_positions()
+                            if cleaned > 0:
+                                print(f"🧹 Cleaned {cleaned} ghost positions after redeem "
+                                      f"(open_positions now {self.live_balance_mgr.open_positions})", flush=True)
                     except Exception as e:
                         if scan_count % 100 == 1:
                             print(f"⚠️ Auto-redeem error: {e}", flush=True)

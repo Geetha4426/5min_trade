@@ -1994,6 +1994,54 @@ class LiveTrader:
     def get_open_positions(self) -> List[Dict]:
         return list(self.positions.values()) + list(self.pending_orders.values())
 
+    def cleanup_stale_positions(self, max_age: float = 600) -> int:
+        """Remove stale positions and resync counter.
+
+        5-min crypto markets resolve within ~5 min of epoch start.
+        Any tracked position older than *max_age* seconds is from a
+        resolved market whose tokens were already auto-redeemed on-chain.
+        """
+        now = time.time()
+        cleaned = 0
+
+        # ── Remove stale open positions ──
+        stale_ids = [
+            tid for tid, pos in self.positions.items()
+            if pos.get('placed_at', 0) > 0 and now - pos['placed_at'] > max_age
+        ]
+        for tid in stale_ids:
+            pos = self.positions.pop(tid, None)
+            if pos:
+                meta = pos.get('metadata') or {}
+                if meta.get('is_dual_leg') or meta.get('orphaned_leg'):
+                    self.balance_mgr.arb_position_count -= 1
+                cleaned += 1
+
+        # ── Remove stale pending orders ──
+        stale_pending = [
+            tid for tid, order in self.pending_orders.items()
+            if order.get('placed_at', 0) > 0 and now - order['placed_at'] > max_age
+        ]
+        for tid in stale_pending:
+            self.pending_orders.pop(tid, None)
+            cleaned += 1
+
+        # ── Resync counter to actual dict sizes ──
+        actual = len(self.positions) + len(self.pending_orders)
+        if self.balance_mgr.open_positions != actual:
+            self.balance_mgr.open_positions = actual
+
+        # ── Resync arb count from real data ──
+        arb_actual = sum(
+            1 for p in self.positions.values()
+            if (p.get('metadata') or {}).get('is_dual_leg')
+            or (p.get('metadata') or {}).get('orphaned_leg')
+        )
+        if self.balance_mgr.arb_position_count != arb_actual:
+            self.balance_mgr.arb_position_count = arb_actual
+
+        return cleaned
+
     def get_summary(self) -> Dict:
         status = self.balance_mgr.get_status()
         wins = sum(1 for t in self.trade_history if (t.get('pnl', 0) or 0) > 0)
