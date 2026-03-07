@@ -1,38 +1,48 @@
 """
-Cross-Timeframe Arbitrage Strategy — GUARANTEED PROFIT (FEE-AWARE)
+Cross-Timeframe Arbitrage Strategy — RISK-AWARE (Fee + Dead-Zone)
 
 THE EDGE: When a 15-minute market has ~5 minutes left, a NEW 5-minute
 market opens for the same coin. Because the 15-min market has already
 "traveled" 10 minutes of price action, its UP/DOWN pricing diverges
 from the fresh 5-min market.
 
-EXAMPLE:
-  15-min UP = 40¢  (already moved, price reflects 10 mins of history)
-  5-min  UP = 50¢  (fresh market, 50/50)
-  
-  Buy UP on 15-min (40¢) + Buy DOWN on 5-min (50¢) = 90¢
-  At settlement: one side pays $1.00
-  GUARANTEED 10¢ profit per share = 11% return in 5 minutes
+RISK (Dead Zone): Each market has a DIFFERENT price-to-beat (Chainlink
+oracle price at its own open time). If the final price lands between
+the two thresholds, BOTH legs lose. This is NOT a guaranteed arb.
 
-Real traders reported 10-15% guaranteed returns from this setup.
+Example dead zone (BTC):
+  15m opened at 4:30 → threshold $67,959  (Chainlink at 4:30)
+  5m  opened at 4:40 → threshold $68,003  (Chainlink at 4:40)
+  Gap = $44 — if final price is 67,959–68,003, BOTH legs lose.
 
-LOGIC:
+STRATEGY:
 1. Scan for overlapping markets: same coin, different timeframes
-2. Find pairs where the remaining time overlaps (~5 min window)
-3. Calculate combined cost of opposite sides
-4. If combined < $0.95 → execute both legs for guaranteed profit
+2. Estimate the dead zone using Binance klines (threshold gap)
+3. Calculate expected value factoring in dead-zone probability
+4. Collect ALL candidates per scan, rank by EV, pick the best one
+5. Only signal when EV > minimum threshold
 """
 
+import re
+import time
+import math
 from typing import Dict, List, Optional
 from strategies.base_strategy import BaseStrategy, TradeSignal
+
+# Parse start epoch from market slugs like "btc-updown-15m-1772875200"
+_SLUG_RE = re.compile(
+    r'(?:btc|eth|sol|xrp)-updown-(?:\d+)m-(?P<epoch>\d+)', re.I
+)
 
 
 class CrossTimeframeArbStrategy(BaseStrategy):
     """
-    Guaranteed profit from cross-timeframe price divergence.
-    
-    Buys opposite sides on overlapping markets (e.g., 15-min UP + 5-min DOWN)
-    when the combined cost is less than $1.00.
+    Cross-timeframe arbitrage with dead-zone risk awareness.
+
+    Buys opposite sides on overlapping markets (e.g., 15-min UP + 5-min DOWN).
+    Uses Binance price data to estimate the gap between each market's
+    price-to-beat threshold and calculates expected value before signaling.
+    Collects all candidates per scan and returns only the best one.
     """
 
     name = "cross_tf_arb"
@@ -41,8 +51,14 @@ class CrossTimeframeArbStrategy(BaseStrategy):
     # Maximum combined cost to enter (lower = more profit)
     MAX_COMBINED_COST = 0.95
 
-    # Minimum profit per share to bother (AFTER FEES)
+    # Minimum expected value per share (after dead-zone risk + fees)
+    MIN_EV = 0.02  # 2¢ minimum EV
+
+    # Legacy min profit (used as floor before EV calculation)
     MIN_PROFIT = 0.03  # 3¢ = ~3% net of fees
+
+    # Maximum dead-zone width as % of asset price — skip if wider
+    MAX_DEAD_ZONE_PCT = 0.12  # 0.12% (≈$82 for BTC, ≈$3 for ETH)
 
     # Estimated taker fee rate per leg — dynamic per price
     @staticmethod
@@ -140,16 +156,15 @@ class CrossTimeframeArbStrategy(BaseStrategy):
 
         # Now scan for pairs: find overlapping markets for the SAME coin
         # We want: longer_tf market with ~5 min left + shorter_tf fresh market
-        signal = await self._find_arb_pair(coin, clob)
+        signal = await self._find_arb_pair(coin, clob, context)
         return signal
 
-    async def _find_arb_pair(self, coin: str, clob) -> Optional[TradeSignal]:
+    async def _find_arb_pair(self, coin: str, clob, context: Dict) -> Optional[TradeSignal]:
         """
-        Find an arb pair for the given coin across timeframes.
-        
-        Looking for:
-          - LONGER market (e.g., 15-min) with 3-7 min remaining
-          - SHORTER market (e.g., 5-min) fresh (close to full time remaining)
+        Find the BEST arb pair for the given coin across timeframes.
+
+        Collects all valid candidates, scores by expected value,
+        and returns only the single best one.
         """
         # Gather all active entries for this coin
         coin_entries = {
@@ -166,24 +181,34 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             key=lambda e: e['market']['timeframe']
         )
 
-        # Try all pairs (longer + shorter)
+        # Collect ALL valid candidates
+        candidates = []
         for i, longer in enumerate(sorted_entries):
             for shorter in sorted_entries[:i]:
-                signal = await self._check_pair(longer, shorter, clob)
+                signal = await self._check_pair(longer, shorter, clob, context)
                 if signal:
-                    return signal
+                    candidates.append(signal)
 
-        return None
+        if not candidates:
+            return None
 
-    async def _check_pair(self, longer_entry, shorter_entry, clob) -> Optional[TradeSignal]:
+        # Rank by expected value (stored in metadata)
+        candidates.sort(key=lambda s: s.metadata.get('expected_value', 0), reverse=True)
+
+        best = candidates[0]
+        if len(candidates) > 1:
+            ev = best.metadata.get('expected_value', 0)
+            print(f"🏆 {coin} cross_tf_arb: picked best of {len(candidates)} "
+                  f"candidates (EV={ev:.3f})", flush=True)
+
+        return best
+
+    async def _check_pair(self, longer_entry, shorter_entry, clob, context: Dict) -> Optional[TradeSignal]:
         """
         Check if a longer/shorter market pair has an arb opportunity.
-        
-        Strategy:
-          - The LONGER market has been running, so its price has moved
-            away from 50¢ based on historical price action
-          - The SHORTER market just opened, still near 50¢
-          - Buy the FAVORABLE side on longer + OPPOSITE side on shorter
+
+        Now risk-aware: estimates the dead zone between the two markets'
+        price-to-beat thresholds and calculates expected value.
         """
         longer_mkt = longer_entry['market']
         shorter_mkt = shorter_entry['market']
@@ -200,6 +225,20 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         if freshness < 0.60:  # Should have at least 60% time remaining
             return None
 
+        # === DEAD ZONE ESTIMATION ===
+        binance_feed = context.get('binance_feed')
+        dz = self._estimate_dead_zone(longer_mkt, shorter_mkt, binance_feed)
+
+        # If dead zone is too wide, skip entirely
+        if dz and dz['pct'] > self.MAX_DEAD_ZONE_PCT:
+            coin = longer_mkt['coin']
+            self._log_depth_skip(
+                coin,
+                f"dead zone {dz['width']:.2f} ({dz['pct']:.3f}%) > "
+                f"{self.MAX_DEAD_ZONE_PCT:.2f}% max"
+            )
+            return None
+
         # Get orderbooks for both markets
         longer_up_book = clob.get_orderbook(longer_mkt.get('up_token_id', ''))
         longer_dn_book = clob.get_orderbook(longer_mkt.get('down_token_id', ''))
@@ -210,8 +249,6 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             return None
 
         # === FIND THE BEST COMBINATION (FEE-AWARE + DEPTH-AWARE) ===
-        # Use fillable price (worst price needed to fill our order size)
-        # instead of best_ask, which may have only 1 share available.
         ctx = longer_entry.get('context', {})
         balance_mgr = ctx.get('balance_mgr')
         leg_size = self.EXPECTED_LEG_SIZE
@@ -240,21 +277,31 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         combo_b_profit = 1.0 - combo_b_cost - combo_b_fees
         combo_b_fillable = b_p1_ok and b_p2_ok
 
-        # Pick the most profitable combination
-        # Prefer combos where BOTH legs are fillable at our size
+        # === CALCULATE EXPECTED VALUE FOR EACH COMBO ===
+        p_dead = dz['p_dead'] if dz else 0.05  # Conservative 5% default if no data
+        dz_width = dz['width'] if dz else 0
+        dz_pct = dz['pct'] if dz else 0
+
+        # EV = (1-p_dead) * profit_if_win - p_dead * cost_if_lose
+        # Simplifies to: EV = 1 - p_dead - combined_cost - fees
+        combo_a_ev = (1 - p_dead) * combo_a_profit - p_dead * (combo_a_cost + combo_a_fees)
+        combo_b_ev = (1 - p_dead) * combo_b_profit - p_dead * (combo_b_cost + combo_b_fees)
+
+        # Pick the most profitable combination by EV
         if combo_a_fillable and not combo_b_fillable:
             pick_a = True
         elif combo_b_fillable and not combo_a_fillable:
             pick_a = False
         else:
-            pick_a = combo_a_profit >= combo_b_profit
+            pick_a = combo_a_ev >= combo_b_ev
 
         if pick_a:
             best_combo = 'A'
             combined_cost = combo_a_cost
             profit = combo_a_profit
+            ev = combo_a_ev
+            total_fees = combo_a_fees
             both_fillable = combo_a_fillable
-            # We buy UP on longer, DOWN on shorter
             primary_side = 'UP'
             primary_token = longer_mkt['up_token_id']
             primary_price = a_p1_fill
@@ -267,8 +314,9 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             best_combo = 'B'
             combined_cost = combo_b_cost
             profit = combo_b_profit
+            ev = combo_b_ev
+            total_fees = combo_b_fees
             both_fillable = combo_b_fillable
-            # We buy DOWN on longer, UP on shorter
             primary_side = 'DOWN'
             primary_token = longer_mkt['down_token_id']
             primary_price = b_p1_fill
@@ -278,50 +326,68 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             primary_depth = longer_dn_book.get('ask_depth', 0)
             hedge_depth = shorter_up_book.get('ask_depth', 0)
 
-        # === FILTER ===
+        # === FILTERS ===
         if combined_cost > self.MAX_COMBINED_COST:
             return None
 
-        # SEED/PLANT: higher edge bar (5¢ net) since capital is precious
+        # SEED/PLANT: higher edge bar since capital is precious
         min_profit = 0.05 if getattr(self, '_seed_mode', False) else self.MIN_PROFIT
         if profit < min_profit:
             return None
 
-        # Check liquidity — both total depth and fillability at our size
+        # EV must exceed minimum (accounts for dead zone risk)
+        if ev < self.MIN_EV:
+            coin = longer_mkt['coin']
+            self._log_depth_skip(
+                coin,
+                f"EV too low: {ev:.3f} (profit={profit:.3f}, "
+                f"p_dead={p_dead:.1%}, gap={dz_width:.1f})"
+            )
+            return None
+
+        # Check liquidity — both total depth and fillability
         min_depth = min(primary_depth, hedge_depth)
         coin = longer_mkt['coin']
         if min_depth < self.MIN_DEPTH:
             self._log_depth_skip(coin, f"depth ${min_depth:.2f} < ${self.MIN_DEPTH:.2f} min")
             return None
 
-        # If neither combo is fillable at our order size, skip
-        # (prevents FOK kills from thin top-of-book)
         if not both_fillable:
             self._log_depth_skip(coin, f"not fillable at ${leg_size:.2f}/leg "
                                  f"(combo {best_combo}: primary={primary_depth:.2f} hedge={hedge_depth:.2f})")
             return None
 
-        # Confidence scales with profit margin
-        confidence = min(0.99, 0.80 + profit * 5)  # 3% profit → 95% confidence
+        # Confidence scales with EV (not raw profit)
+        confidence = min(0.99, 0.70 + ev * 8)
 
         pct_return = profit / combined_cost * 100
+        ev_pct = ev / combined_cost * 100
+
+        # Build rationale with dead-zone info
+        dz_info = ""
+        if dz and dz['width'] > 0:
+            dz_info = (
+                f"\n  ⚠️ Dead zone: ${dz['width']:.2f} gap ({dz['pct']:.3f}%), "
+                f"P(both-lose)={p_dead:.1%}"
+            )
 
         rationale = (
-            f"🔗 CROSS-TF ARB: {longer_mkt['coin']} — GUARANTEED {pct_return:.1f}% profit\n"
-            f"  Leg 1: {primary_side} on {longer_mkt['timeframe']}m @ {primary_price:.2f}¢ "
-            f"({longer_secs}s remaining)\n"
-            f"  Leg 2: {hedge_side} on {shorter_mkt['timeframe']}m @ {hedge_price:.2f}¢ "
-            f"(fresh market)\n"
+            f"🔗 CROSS-TF ARB: {coin} — EV {ev_pct:.1f}% "
+            f"(raw {pct_return:.1f}%, risk-adj)\n"
+            f"  Leg 1: {primary_side} on {longer_mkt['timeframe']}m @ "
+            f"{primary_price:.2f}¢ ({longer_secs}s left)\n"
+            f"  Leg 2: {hedge_side} on {shorter_mkt['timeframe']}m @ "
+            f"{hedge_price:.2f}¢ (fresh)\n"
             f"  Combined: {combined_cost:.2f}¢ → Payout: $1.00 → "
-            f"Profit: {profit:.2f}¢/share ({pct_return:.1f}%)\n"
-            f"  Depth: ${min_depth:.0f} available"
+            f"Profit: {profit:.2f}¢ | EV: {ev:.3f}¢{dz_info}\n"
+            f"  Depth: ${min_depth:.0f}"
         )
 
         return TradeSignal(
             strategy=self.name,
-            coin=longer_mkt['coin'],
+            coin=coin,
             timeframe=longer_mkt['timeframe'],
-            direction='BOTH',  # Dual-leg trade
+            direction='BOTH',
             token_id=f"{primary_token}|{hedge_token}",
             market_id=f"{longer_mkt['market_id']}|{shorter_mkt['market_id']}",
             entry_price=combined_cost,
@@ -339,12 +405,140 @@ class CrossTimeframeArbStrategy(BaseStrategy):
                 'hedge_timeframe': shorter_mkt['timeframe'],
                 'combined_cost': combined_cost,
                 'profit_per_share': profit,
+                'expected_value': ev,
                 'pct_return': pct_return,
+                'ev_pct': ev_pct,
+                'p_dead_zone': p_dead,
+                'dead_zone_width': dz_width,
+                'dead_zone_pct': dz_pct,
                 'min_depth': min_depth,
                 'longer_secs_remaining': longer_secs,
                 'shorter_secs_remaining': shorter_secs,
             }
         )
+
+    def _estimate_dead_zone(self, longer_mkt: Dict, shorter_mkt: Dict,
+                            binance_feed) -> Optional[Dict]:
+        """
+        Estimate the dead zone between two markets' price-to-beat thresholds.
+
+        Each market's threshold = Chainlink price at its start epoch.
+        Uses Binance 1m klines to approximate the Chainlink prices,
+        then calculates gap width and probability of the final price
+        landing in the dead zone.
+
+        Returns dict with: width, pct, p_dead, lo, hi, current_price
+        Or None if estimation fails (treat as moderate risk).
+        """
+        # Parse start epochs from event slugs
+        longer_slug = longer_mkt.get('event_slug', '')
+        shorter_slug = shorter_mkt.get('event_slug', '')
+
+        m_longer = _SLUG_RE.search(longer_slug)
+        m_shorter = _SLUG_RE.search(shorter_slug)
+
+        if not m_longer or not m_shorter:
+            return None
+
+        epoch_longer = int(m_longer.group('epoch'))
+        epoch_shorter = int(m_shorter.group('epoch'))
+        time_gap_secs = abs(epoch_shorter - epoch_longer)
+
+        if time_gap_secs == 0:
+            # Same start time → same threshold → no dead zone
+            return {'width': 0, 'pct': 0, 'p_dead': 0.0, 'lo': 0, 'hi': 0,
+                    'current_price': 0}
+
+        coin = longer_mkt['coin']
+
+        # Get Binance 1m klines covering the gap period
+        from data.binance_signals import _get_klines, _parse_klines
+        klines = _parse_klines(_get_klines(coin, '1m', 20))
+
+        if len(klines) < 3:
+            return None
+
+        # Find the close price at each market's start epoch
+        epoch_longer_ms = epoch_longer * 1000
+        epoch_shorter_ms = epoch_shorter * 1000
+
+        price_at_longer = None
+        price_at_shorter = None
+
+        for k in klines:
+            ot = k['open_time']
+            ct = k['close_time']
+            # Kline covers [open_time, close_time] — match epoch within candle
+            if ot <= epoch_longer_ms <= ct:
+                price_at_longer = k['close']
+            if ot <= epoch_shorter_ms <= ct:
+                price_at_shorter = k['close']
+
+        # Fallback: use BinanceFeed price_history snapshots
+        if (not price_at_longer or not price_at_shorter) and binance_feed:
+            history = binance_feed.get_price_history(coin)
+            for snap in history:
+                snap_ms = snap.timestamp * 1000
+                if not price_at_longer and abs(snap_ms - epoch_longer_ms) < 45000:
+                    price_at_longer = snap.price
+                if not price_at_shorter and abs(snap_ms - epoch_shorter_ms) < 45000:
+                    price_at_shorter = snap.price
+
+        if not price_at_longer or not price_at_shorter:
+            return None
+
+        # Dead zone = gap between the two thresholds
+        gap = price_at_shorter - price_at_longer
+        width = abs(gap)
+        lo = min(price_at_longer, price_at_shorter)
+        hi = max(price_at_longer, price_at_shorter)
+
+        # Current Binance price
+        current_price = None
+        if binance_feed:
+            current_price = binance_feed.get_price(coin)
+        if not current_price:
+            current_price = klines[-1]['close']
+
+        pct = width / current_price * 100 if current_price else 0
+
+        # Estimate recent 1m volatility (stddev of 1m returns)
+        closes = [k['close'] for k in klines[-10:]]
+        if len(closes) >= 3:
+            returns = [(closes[i] - closes[i-1]) / closes[i-1]
+                       for i in range(1, len(closes))]
+            vol_1m_pct = (sum(r**2 for r in returns) / len(returns)) ** 0.5
+        else:
+            vol_1m_pct = 0.001  # Conservative fallback
+
+        # Project volatility to remaining ~5 minutes
+        remaining_mins = 5.0
+        vol_remaining = vol_1m_pct * remaining_mins ** 0.5 * current_price
+
+        # Dead zone probability using normal approximation
+        # P(lo < P_final < hi) where P_final ~ N(current_price, vol²)
+        if vol_remaining > 0:
+            mid = (lo + hi) / 2
+            z_dist = abs(current_price - mid) / vol_remaining
+            # Base probability from gap width relative to volatility
+            p_base = width / (vol_remaining * 2.507)  # sqrt(2*pi) ≈ 2.507
+            # Modulate by distance from dead zone center
+            p_dead = p_base * math.exp(-0.5 * z_dist * z_dist)
+            p_dead = min(0.50, max(0.01, p_dead))
+        else:
+            p_dead = 0.15  # Conservative default
+
+        return {
+            'width': width,
+            'pct': pct,
+            'lo': lo,
+            'hi': hi,
+            'p_dead': p_dead,
+            'current_price': current_price,
+            'vol_remaining': vol_remaining,
+            'price_at_longer': price_at_longer,
+            'price_at_shorter': price_at_shorter,
+        }
 
     def get_suitable_timeframes(self) -> List[int]:
         """Needs multiple timeframes to find overlapping pairs."""
