@@ -23,6 +23,16 @@ class YesNoArbStrategy(BaseStrategy):
 
     def __init__(self):
         self.max_combined = Config.ARB_MAX_COMBINED_PRICE
+        self._depth_skip_log = {}
+
+    def _log_depth_skip(self, coin: str, reason: str):
+        """Log depth skip once per 30s per coin."""
+        import time
+        now = time.time()
+        last = self._depth_skip_log.get(coin, 0)
+        if now - last > 30:
+            self._depth_skip_log[coin] = now
+            print(f"💧 Depth skip: {coin} yes_no_arb — {reason}", flush=True)
 
     @staticmethod
     def _fillable_price(book: dict, size_usd: float) -> tuple:
@@ -80,12 +90,18 @@ class YesNoArbStrategy(BaseStrategy):
             dn_fill, dn_ok = self._fillable_price(dual_book['down'], leg_size)
 
             if not (up_ok and dn_ok):
+                self._log_depth_skip(market['coin'],
+                    f"not fillable at ${leg_size:.2f}/leg "
+                    f"(up={'OK' if up_ok else 'THIN'} dn={'OK' if dn_ok else 'THIN'})")
                 return None  # Not enough depth to fill both legs
 
             # Recalculate profit at realistic fill prices (not just best_ask)
             real_combined = up_fill + dn_fill
             real_profit = 1.0 - real_combined
             if real_profit < 0.01:
+                self._log_depth_skip(market['coin'],
+                    f"fill price {real_combined:.4f} eats profit "
+                    f"(real profit ${real_profit:.4f})")
                 return None  # No profitable arb at realistic fill prices
 
             confidence = min(0.99, 0.85 + real_profit * 2)

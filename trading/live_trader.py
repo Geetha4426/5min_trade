@@ -668,9 +668,15 @@ class LiveTrader:
         # ── Signal dedup: suppress repeated signals for same coin+direction+strategy ──
         # Problem: oracle_arb fired 14 BTC UP signals in 60 seconds, all identical.
         # Different from cooldown (which is per stop-loss). This blocks signal spam.
+        # BOTH (arb) signals get longer dedup: they reserve 2 slots and are expensive.
         dedup_key = f"{signal.coin}_{signal.direction}_{signal.strategy}"
         last_fired = self._signal_dedup.get(dedup_key, 0)
-        dedup_window = self.SIGNAL_DEDUP_SECS if mode in ('seed', 'concentration') else 3
+        if is_arb:
+            dedup_window = 30  # Arb signals: 30s dedup across all modes
+        elif mode in ('seed', 'concentration'):
+            dedup_window = self.SIGNAL_DEDUP_SECS
+        else:
+            dedup_window = 5
         if time.time() - last_fired < dedup_window:
             return None
         self._signal_dedup[dedup_key] = time.time()
@@ -850,6 +856,7 @@ class LiveTrader:
                             self.clob_client.cancel(first.get('order_id', ''))
                             print(f"⚠️ Leg 2 failed, cancelled leg 1 GTC: {first['order_id']}", flush=True)
                             self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+                            self.balance_mgr.arb_position_count -= 1
                             self.balance_mgr.update_balance(self.balance_mgr.balance + first['size_usd'])
                             self.balance_mgr._estimated_position_value = max(
                                 0, self.balance_mgr._estimated_position_value - first['size_usd'])
@@ -1061,6 +1068,10 @@ class LiveTrader:
                 self.pending_orders[trade_id] = trade
 
             self.balance_mgr.open_positions += 1
+            # Track arb position count for slot management
+            meta = signal.metadata or {}
+            if meta.get('is_dual_leg') or meta.get('orphaned_leg'):
+                self.balance_mgr.arb_position_count += 1
             self.balance_mgr.update_balance(self.balance_mgr.balance - actual_cost)
 
             # Update estimated position value so session breaker doesn't
@@ -1256,6 +1267,9 @@ class LiveTrader:
                     elif status == 'cancelled':
                         to_remove.append(trade_id)
                         self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+                        o_meta = (order.get('metadata') or {})
+                        if o_meta.get('is_dual_leg') or o_meta.get('orphaned_leg'):
+                            self.balance_mgr.arb_position_count -= 1
                         self.balance_mgr.update_balance(
                             self.balance_mgr.balance + order['size_usd']
                         )
@@ -1287,6 +1301,9 @@ class LiveTrader:
                     pass
                 to_remove.append(trade_id)
                 self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+                o_meta = (order.get('metadata') or {})
+                if o_meta.get('is_dual_leg') or o_meta.get('orphaned_leg'):
+                    self.balance_mgr.arb_position_count -= 1
                 self.balance_mgr.update_balance(
                     self.balance_mgr.balance + order['size_usd']
                 )
@@ -1853,6 +1870,10 @@ class LiveTrader:
 
         # Always free the position slot
         self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+        # Decrement arb slot if this was an arb position
+        pos_meta = pos.get('metadata') or {}
+        if pos_meta.get('is_dual_leg') or pos_meta.get('orphaned_leg'):
+            self.balance_mgr.arb_position_count -= 1
 
         # Clear estimated position value (recalculated next check_positions)
         self.balance_mgr._estimated_position_value = 0.0
@@ -1958,6 +1979,9 @@ class LiveTrader:
             count = len(self.pending_orders)
             for tid, order in list(self.pending_orders.items()):
                 self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+                o_meta = (order.get('metadata') or {})
+                if o_meta.get('is_dual_leg') or o_meta.get('orphaned_leg'):
+                    self.balance_mgr.arb_position_count -= 1
                 self.balance_mgr.update_balance(
                     self.balance_mgr.balance + order['size_usd']
                 )

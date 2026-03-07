@@ -119,12 +119,18 @@ class TimeDecayStrategy(BaseStrategy):
 
         if market_direction == 'UP':
             winning_ask = up_ask
+            winning_depth = up_book.get('ask_depth', 0)
             token_id = market.get('up_token_id', '')
         else:
             winning_ask = down_ask
+            winning_depth = down_book.get('ask_depth', 0)
             token_id = market.get('down_token_id', '')
 
         if not token_id:
+            return None
+
+        # Check ask depth — need at least $1 liquidity to fill
+        if winning_depth < 1.0:
             return None
 
         discount = fair_value - winning_ask

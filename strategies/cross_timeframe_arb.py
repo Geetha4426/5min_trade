@@ -87,6 +87,16 @@ class CrossTimeframeArbStrategy(BaseStrategy):
     # Track discovered pairs to avoid duplicate signals (instance-level)
     def __init__(self):
         self._active_pairs = {}
+        self._depth_skip_log = {}  # coin -> last_log_time for throttling
+
+    def _log_depth_skip(self, coin: str, reason: str):
+        """Log depth skip once per 30s per coin to avoid spam."""
+        import time
+        now = time.time()
+        last = self._depth_skip_log.get(coin, 0)
+        if now - last > 30:
+            self._depth_skip_log[coin] = now
+            print(f"💧 Depth skip: {coin} cross_tf_arb — {reason}", flush=True)
 
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         """
@@ -279,12 +289,16 @@ class CrossTimeframeArbStrategy(BaseStrategy):
 
         # Check liquidity — both total depth and fillability at our size
         min_depth = min(primary_depth, hedge_depth)
+        coin = longer_mkt['coin']
         if min_depth < self.MIN_DEPTH:
+            self._log_depth_skip(coin, f"depth ${min_depth:.2f} < ${self.MIN_DEPTH:.2f} min")
             return None
 
         # If neither combo is fillable at our order size, skip
         # (prevents FOK kills from thin top-of-book)
         if not both_fillable:
+            self._log_depth_skip(coin, f"not fillable at ${leg_size:.2f}/leg "
+                                 f"(combo {best_combo}: primary={primary_depth:.2f} hedge={hedge_depth:.2f})")
             return None
 
         # Confidence scales with profit margin

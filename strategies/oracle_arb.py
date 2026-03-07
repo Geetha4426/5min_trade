@@ -109,18 +109,24 @@ class OracleArbStrategy(BaseStrategy):
         if direction == 'UP':
             token_id = market['up_token_id']
             entry_price = up_book['best_ask']
+            entry_depth = up_book.get('ask_depth', 0)
             market_mid = poly_up_mid
             true_prob = signals['divergence']['binance_implied_prob']
             actual_edge = true_prob - poly_up_mid
         else:
             token_id = market['down_token_id']
             entry_price = down_book['best_ask']
+            entry_depth = down_book.get('ask_depth', 0)
             market_mid = poly_down_mid
             true_prob = 1 - signals['divergence']['binance_implied_prob']
             actual_edge = true_prob - poly_down_mid
 
         # Skip if entry price is too high (diminishing returns)
         if entry_price >= 0.90:
+            return None
+
+        # Check ask depth — need at least $1 liquidity to fill
+        if entry_depth < 1.0:
             return None
 
         # Build detailed rationale

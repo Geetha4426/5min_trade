@@ -136,6 +136,7 @@ class LiveBalanceManager:
         self.mode_name = mode.lower()
         self.mode = LIVE_MODES.get(self.mode_name, LIVE_MODES['concentration'])
         self.open_positions = 0
+        self._arb_position_count = 0
 
         # ── Drawdown tracking (alert-only, never blocks) ──
         self.peak_balance = balance          # Highest balance ever seen
@@ -310,14 +311,34 @@ class LiveBalanceManager:
         if self.tradeable_balance < Config.POLYMARKET_MIN_ORDER_SIZE:
             return False, f"🛡️ Only reserve left (${self.reserve:.2f})"
 
-        # Dynamic arb slot: SEED/PLANT allow +1 position for dual-leg arb
-        effective_cap = self.max_positions
-        if is_arb and self.mode_name in ('seed', 'plant'):
-            effective_cap = min(self.mode.max_positions_cap + 1, 3)
+        # ── Arb-aware position limits ──
+        # Each arb trade uses 2 slots. Expand cap by +2 when arb signal,
+        # but require 2 free slots and max 2 concurrent arb trades.
+        base_cap = self.max_positions
 
-        if self.open_positions >= effective_cap:
-            return False, f"📊 {self.open_positions}/{effective_cap} positions open"
+        if is_arb:
+            # Max 2 arb trades active (4 arb positions)
+            if self.arb_position_count >= 4:
+                return False, f"🔒 {self.arb_position_count // 2} arb trades active (max 2)"
+            # Expand cap by +2 to accommodate dual-leg arb
+            effective_cap = base_cap + 2
+            # Need at least 2 free slots for both legs
+            if self.open_positions + 2 > effective_cap:
+                return False, (f"📊 {self.open_positions}/{effective_cap} positions open "
+                               f"(need 2 free for arb)")
+        else:
+            if self.open_positions >= base_cap:
+                return False, f"📊 {self.open_positions}/{base_cap} positions open"
         return True, f"{self.mode.emoji} {self.mode.name}"
+
+    @property
+    def arb_position_count(self) -> int:
+        """Count of positions from arb trades (dual_leg or orphaned_leg)."""
+        return getattr(self, '_arb_position_count', 0)
+
+    @arb_position_count.setter
+    def arb_position_count(self, value: int):
+        self._arb_position_count = max(0, value)
 
     def can_afford_dual_leg(self) -> bool:
         """Check if balance supports a dual-leg trade (2× minimum per leg)."""

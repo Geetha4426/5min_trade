@@ -425,9 +425,16 @@ class TradingEngine:
 
                     if signal:
                         mode_tag = '🔴LIVE' if self.trading_mode == 'live' else '📋PAPER'
-                        print(f"🎯 [{mode_tag}] Signal: {signal.strategy} -> {market.get('coin','?')} "
-                              f"{signal.direction} @ {signal.entry_price:.4f} "
-                              f"(conf={signal.confidence:.0%})", flush=True)
+                        # Throttle signal log: same strategy+coin+direction only once per 15s
+                        sig_key = f"{signal.strategy}_{signal.coin}_{signal.direction}"
+                        now_t = time.time()
+                        if not hasattr(self, '_signal_log_dedup'):
+                            self._signal_log_dedup = {}
+                        if sig_key not in self._signal_log_dedup or now_t - self._signal_log_dedup[sig_key] > 15:
+                            self._signal_log_dedup[sig_key] = now_t
+                            print(f"🎯 [{mode_tag}] Signal: {signal.strategy} -> {market.get('coin','?')} "
+                                  f"{signal.direction} @ {signal.entry_price:.4f} "
+                                  f"(conf={signal.confidence:.0%})", flush=True)
                         try:
                             trade = await self.active_trader.execute_signal(signal)
                         except Exception as exec_err:
