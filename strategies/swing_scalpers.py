@@ -301,15 +301,19 @@ class SpikeFade(BaseStrategy):
             # Calculate potential
             potential_return = 0.30 / buy_price if buy_price > 0 else 0 # Target 30¢ bounce
 
-            confidence = min(0.88, 0.55 + (spike_price - 0.80) * 3 + (0.20 - buy_price) * 2)
+            confidence = min(0.82, 0.50 + (spike_price - 0.80) * 2 + (0.20 - buy_price) * 1.5)
 
-            # Boost if Binance is actively REVERSING against the spike
+            # REQUIRE Binance opposition — if Binance is flat, skip entirely.
+            # Spike fades at low prices ($0.10-0.14) are coin flips without
+            # Binance confirmation that the spike is overextended.
             binance_opposes_spike = (
                 binance_direction is not None and
                 binance_direction != spike_side
             )
-            if binance_opposes_spike:
-                confidence = min(0.93, confidence + 0.06)
+            if not binance_opposes_spike:
+                continue  # No Binance reversal signal → skip this candidate
+            # Binance confirms reversal → boost
+            confidence = min(0.90, confidence + 0.08)
 
             return TradeSignal(
                 strategy=self.name,

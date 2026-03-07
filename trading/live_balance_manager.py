@@ -45,7 +45,7 @@ LIVE_MODES = {
     'seed': LiveRiskMode(
         name='SEED',
         emoji='🌱',
-        max_bet_pct=50.0,       # Max 50% per trade — protect the stack
+        max_bet_pct=20.0,       # Max 20% per trade (was 50% — way too aggressive)
         reserve_pct=15.0,       # Keep 15% as buffer for sell fees/emergencies
         reserve_min=0.50,       # Always keep $0.50 minimum reserve
         max_pos_per_dollar=1.0, # 1 position per $1
@@ -56,13 +56,13 @@ LIVE_MODES = {
     'plant': LiveRiskMode(
         name='PLANT',
         emoji='🌿',
-        max_bet_pct=35.0,       # 35% — bigger bets than seed, still safe
-        reserve_pct=20.0,       # 20% reserve
+        max_bet_pct=22.0,       # 22% — balanced growth; Kelly tunes actual size
+        reserve_pct=22.0,       # 22% reserve
         reserve_min=2.0,        # Always keep $2
         max_pos_per_dollar=0.5, # 1 position per $2
-        max_positions_cap=3,    # 3 positions max
-        min_confidence=0.85,    # High bar — allows spike_fade, early_mover, binance_momentum
-        description='$5-15 — growth mode with high-confidence signals',
+        max_positions_cap=3,    # 3 positions — allows arb + directional
+        min_confidence=0.87,    # Strong signals only (was 0.85 → 0.87)
+        description='$5-15 — growth mode, Kelly-sized, quality signals',
     ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
@@ -278,15 +278,15 @@ class LiveBalanceManager:
                 # triggers when USDC drops purely from buying (not losing).
                 effective_balance = self.balance + self._estimated_position_value
                 session_loss_pct = (1 - effective_balance / self._session_start_balance) * 100
-                if session_loss_pct >= 40:
+                if session_loss_pct >= 25:
                     now = time.time()
                     if self._session_paused_until == 0:
-                        self._session_paused_until = now + 300  # 5 min pause
+                        self._session_paused_until = now + 600  # 10 min pause (was 5)
                         print(f"\n{'='*60}", flush=True)
                         print(f"🚨 SESSION BREAKER: -{session_loss_pct:.0f}% loss in {self.mode.name} mode", flush=True)
                         print(f"  ${self._session_start_balance:.2f} → ${effective_balance:.2f} "
                               f"(USDC ${self.balance:.2f} + positions ~${self._estimated_position_value:.2f})", flush=True)
-                        print(f"  Pausing for 5 minutes to break the losing streak.", flush=True)
+                        print(f"  Pausing for 10 minutes to break the losing streak.", flush=True)
                         print(f"{'='*60}\n", flush=True)
                     if now < self._session_paused_until:
                         remaining = (self._session_paused_until - now) / 60
@@ -313,13 +313,15 @@ class LiveBalanceManager:
 
         # ── Arb-aware position limits ──
         # Each arb trade uses 2 slots. Expand cap by +2 when arb signal,
-        # but require 2 free slots and max 2 concurrent arb trades.
+        # but require 2 free slots and respect mode-based arb limits.
         base_cap = self.max_positions
 
         if is_arb:
-            # Max 2 arb trades active (4 arb positions)
-            if self.arb_position_count >= 4:
-                return False, f"🔒 {self.arb_position_count // 2} arb trades active (max 2)"
+            # SEED: max 1 arb trade (2 positions) — protect tiny capital
+            # PLANT+: max 2 arb trades (4 positions) — per-coin limit guards concentration
+            max_arb_positions = 2 if self.mode_name == 'seed' else 4
+            if self.arb_position_count >= max_arb_positions:
+                return False, f"🔒 {self.arb_position_count // 2} arb trades active (max {max_arb_positions // 2})"
             # Expand cap by +2 to accommodate dual-leg arb
             effective_cap = base_cap + 2
             # Need at least 2 free slots for both legs
@@ -352,6 +354,11 @@ class LiveBalanceManager:
         Cheap hunter mode: fixed $1 per bet (the whole strategy is to spread
         small bets across many markets).
         
+        Uses fractional Kelly criterion for edge-aware sizing:
+          kelly_fraction = (p - market_price) / (1 - market_price)
+        where p = estimated win probability (derived from confidence).
+        Applies 25% fractional Kelly (conservative) to avoid over-betting.
+
         After consecutive losses, sizes gently shrink by 5% each.
         After consecutive wins, sizes grow by 5% each (capped at 130%).
         Always returns at least $1 (Polymarket minimum) or 0 if can't trade.
@@ -362,16 +369,48 @@ class LiveBalanceManager:
         if self.cheap_hunter_mode:
             return min_size if self.tradeable_balance >= min_size else 0
 
-        # Scale bet size with confidence
+        # ── Kelly Criterion sizing ──
+        # Estimate win probability from confidence score
+        # confidence 0.85 → p ≈ 0.55, confidence 0.95 → p ≈ 0.65
+        # Conservative mapping: confidence doesn't mean probability
+        p_win = 0.50 + (confidence - 0.80) * 0.50  # 0.80 conf → 50%, 0.90 → 55%, 1.0 → 60%
+        p_win = max(0.50, min(0.70, p_win))  # Clamp: never assume >70% edge
+
+        entry_price = getattr(self, '_last_signal_price', 0.50)
+        # Kelly: f* = (p - m) / (1 - m), with mode-aware fractional sizing
+        # SEED: 20% fractional (ultra-conservative)
+        # PLANT: 35% fractional (growth-oriented)
+        # Others: 25% fractional (balanced)
+        kelly_pct = {'seed': 0.20, 'plant': 0.35}.get(self.mode_name, 0.25)
+        if entry_price > 0 and entry_price < 1.0:
+            kelly_edge = p_win - entry_price
+            if kelly_edge <= 0:
+                # No edge → minimum bet only
+                kelly_frac = 0.0
+            else:
+                kelly_full = kelly_edge / (1.0 - entry_price)
+                kelly_frac = kelly_full * kelly_pct
+        else:
+            kelly_frac = 0.0
+
+        # Kelly-based size: fraction of tradeable balance
+        kelly_size = self.tradeable_balance * kelly_frac
+
+        # Fallback: percentage-based sizing (reduced from old values)
         pct = self.mode.max_bet_pct * (0.5 + confidence * 0.5)
-        size = self.tradeable_balance * pct / 100
+        pct_size = self.tradeable_balance * pct / 100
+
+        # Use the SMALLER of Kelly and percentage (conservative approach)
+        size = min(kelly_size, pct_size) if kelly_frac > 0 else pct_size
 
         # Apply consecutive loss/win multiplier
         size *= self._size_multiplier
 
-        # Enforce Polymarket minimum
-        max_size = self.tradeable_balance * 0.50  # Never more than 50% of tradeable
-
+        # Hard cap: mode-aware max per trade (% of TOTAL balance, includes reserve)
+        # SEED: 15% — protect tiny capital
+        # PLANT+: 25% — room to grow
+        hard_cap_pct = 0.15 if self.mode_name == 'seed' else 0.25
+        max_size = self.balance * hard_cap_pct
         size = max(min_size, min(size, max_size))
 
         # Can't afford even the minimum?

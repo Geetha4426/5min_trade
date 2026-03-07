@@ -73,7 +73,7 @@ class LiveTrader:
         self.SIGNAL_DEDUP_SECS = 10  # Suppress same coin+dir+strategy within 10s
         # ── Global post-loss throttle: brief pause after ANY stop-loss ──
         self._last_stop_loss_time: float = 0
-        self.POST_LOSS_THROTTLE_SECS = 5  # 5s pause — just prevents 3s revenge trades
+        self.POST_LOSS_THROTTLE_SECS = 30  # 30s pause — prevents revenge trading after any loss
         # ── Orderbook reader for smart exits (set by app.py) ──
         self.clob_reader = None
 
@@ -657,10 +657,32 @@ class LiveTrader:
                 if pos.get('coin') == signal.coin and pos.get('direction') != signal.direction:
                     return None  # Opposite direction conflict
 
-        # ── Global post-loss throttle: brief pause after ANY stop-loss ──
+        # ── Per-coin exposure limit (SEED/PLANT): max 1 trade per coin ──
+        # Prevents stacking multiple positions on the same coin (e.g., ETH DOWN
+        # spike_fade + ETH DOWN arb leg), which creates hidden concentrated risk.
+        if mode in ('seed', 'plant') and signal.direction != 'BOTH':
+            coin_positions = sum(
+                1 for pos in self.positions.values()
+                if pos.get('coin') == signal.coin
+            )
+            coin_pending = sum(
+                1 for pos in self.pending_orders.values()
+                if pos.get('coin') == signal.coin
+            )
+            if coin_positions + coin_pending > 0:
+                return None  # Already have exposure to this coin
+
+        # ── Total exposure cap (SEED/PLANT): max 50% of balance deployed ──
+        # Even with position limits, dollar exposure can exceed safe levels.
+        if mode in ('seed', 'plant'):
+            total_deployed = self.balance_mgr._estimated_position_value
+            if total_deployed > self.balance_mgr.balance * 0.50:
+                return None  # Already 50%+ deployed — wait for exits
+
+        # ── Global post-loss throttle: pause after ANY stop-loss ──
         # Prevents revenge trading across all coins after a loss.
-        # SEED/CONCENTRATION only — higher modes trade freely.
-        if mode in ('seed', 'concentration') and self._last_stop_loss_time > 0:
+        # SEED/PLANT/CONCENTRATION — protect small balances from tilt.
+        if mode in ('seed', 'plant', 'concentration') and self._last_stop_loss_time > 0:
             since_last = time.time() - self._last_stop_loss_time
             if since_last < self.POST_LOSS_THROTTLE_SECS:
                 return None
@@ -693,6 +715,8 @@ class LiveTrader:
                 print(f"⚠️ Skip: {signal.coin} spread {spread_pct:.1f}% > {max_spread:.0f}%", flush=True)
             return None
 
+        # Hint entry price for Kelly criterion sizing
+        self.balance_mgr._last_signal_price = signal.entry_price
         size = self.balance_mgr.get_position_size(signal.confidence)
         if size < Config.POLYMARKET_MIN_ORDER_SIZE:
             print(f"⚠️ Skip: position size ${size:.2f} < minimum ${Config.POLYMARKET_MIN_ORDER_SIZE:.2f} | "
@@ -1030,8 +1054,13 @@ class LiveTrader:
                 print(f"❌ Order rejected: {error_msg}", flush=True)
 
                 # FOK rejection is normal (no liquidity) — try GTC fallback
-                # BUT: GTC has 5-share minimum, which may exceed our balance
+                # BUT: skip GTC fallback for arb legs — partial fills on arbs
+                # create timing risk and GTC's 5-share minimum inflates cost.
+                is_arb_leg = (signal.metadata or {}).get('is_dual_leg', False)
                 if use_fok and error_msg and 'not fill' in error_msg.lower():
+                    if is_arb_leg:
+                        print(f"⚠️ FOK didn't fill (arb leg) — no GTC fallback for arbs", flush=True)
+                        return None
                     # Pre-check: can we afford 5 shares at this price for GTC?
                     gtc_cost = round(price * 5, 2)
                     real_bal = await self._get_cached_balance()
@@ -1117,8 +1146,13 @@ class LiveTrader:
             print(f"❌ Order error: {e}", flush=True)
 
             # ── FOK didn't fill: try GTC fallback ──
+            # Skip GTC fallback for arb legs — avoid partial fill timing risk.
+            is_arb_leg = (signal.metadata or {}).get('is_dual_leg', False)
             if use_fok and ('not fill' in error_str or 'no fill' in error_str
                            or 'fully filled' in error_str or 'killed' in error_str):
+                if is_arb_leg:
+                    print(f"⚠️ FOK exception (arb leg) — no GTC fallback for arbs", flush=True)
+                    return None
                 # Pre-check: can we afford 5 shares at this price for GTC?
                 tick_price = max(0.01, min(0.99, round(signal.entry_price * 100) / 100))
                 gtc_cost = round(tick_price * 5, 2)
