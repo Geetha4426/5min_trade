@@ -421,6 +421,7 @@ class GammaClient:
             'market_id': market.get('id', ''),
             'market_slug': market.get('market_slug', market.get('slug', event_slug)),
             'event_slug': event_slug,
+            'event_start_time': market.get('eventStartTime', ''),
             'up_token_id': up_token or '',
             'down_token_id': down_token or '',
             'up_price': up_price,

@@ -26,6 +26,7 @@ STRATEGY:
 import re
 import time
 import math
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from strategies.base_strategy import BaseStrategy, TradeSignal
 
@@ -417,6 +418,30 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             }
         )
 
+    @staticmethod
+    def _get_start_epoch(market: Dict) -> Optional[int]:
+        """Get market window start time as Unix epoch seconds.
+
+        Prefers `event_start_time` (ISO string from Gamma API).
+        Falls back to parsing the epoch from the event_slug.
+        """
+        # Method 1: eventStartTime from API (e.g. "2026-03-07T10:35:00Z")
+        est = market.get('event_start_time', '')
+        if est:
+            try:
+                dt = datetime.fromisoformat(est.replace('Z', '+00:00'))
+                return int(dt.timestamp())
+            except (ValueError, TypeError):
+                pass
+
+        # Method 2: Parse epoch from event_slug (e.g. "btc-updown-5m-1772879700")
+        slug = market.get('event_slug', '') or market.get('market_slug', '')
+        m = _SLUG_RE.search(slug)
+        if m:
+            return int(m.group('epoch'))
+
+        return None
+
     def _estimate_dead_zone(self, longer_mkt: Dict, shorter_mkt: Dict,
                             binance_feed) -> Optional[Dict]:
         """
@@ -430,18 +455,12 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         Returns dict with: width, pct, p_dead, lo, hi, current_price
         Or None if estimation fails (treat as moderate risk).
         """
-        # Parse start epochs from event slugs
-        longer_slug = longer_mkt.get('event_slug', '')
-        shorter_slug = shorter_mkt.get('event_slug', '')
+        # Get start epochs — prefer eventStartTime from API, fallback to slug
+        epoch_longer = self._get_start_epoch(longer_mkt)
+        epoch_shorter = self._get_start_epoch(shorter_mkt)
 
-        m_longer = _SLUG_RE.search(longer_slug)
-        m_shorter = _SLUG_RE.search(shorter_slug)
-
-        if not m_longer or not m_shorter:
+        if not epoch_longer or not epoch_shorter:
             return None
-
-        epoch_longer = int(m_longer.group('epoch'))
-        epoch_shorter = int(m_shorter.group('epoch'))
         time_gap_secs = abs(epoch_shorter - epoch_longer)
 
         if time_gap_secs == 0:
