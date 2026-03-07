@@ -786,6 +786,12 @@ class LiveTrader:
             if result:
                 results.append(result)
             else:
+                # ── Leg 1 failed: ABORT entirely — do NOT place leg 2 ──
+                # Placing leg 2 alone creates naked directional exposure
+                # which defeats the purpose of arb/hedged strategies.
+                if not results:
+                    print(f"⚠️ Leg 1 ({side}) failed — aborting dual-leg to avoid naked exposure", flush=True)
+                    return None
                 # If first leg succeeds but second fails, handle the orphan
                 if results:
                     first = results[0]
@@ -799,7 +805,16 @@ class LiveTrader:
                             book = self.clob_reader.get_orderbook(tid) if self.clob_reader else None
                             asks = book.get('asks', []) if book else []
                             if asks:
-                                best_ask = max(0.01, min(0.99, round(asks[0][0] * 100) / 100))
+                                # Walk orderbook to find a price with enough
+                                # depth for our order size (not just best_ask)
+                                remaining = half_size
+                                fill_price = asks[0][0]
+                                for ask_p, ask_sz in asks:
+                                    fill_price = ask_p
+                                    remaining -= ask_p * ask_sz
+                                    if remaining <= 0:
+                                        break
+                                best_ask = max(0.01, min(0.99, round(fill_price * 100) / 100))
                                 leg1_price = first['entry_price']
                                 fee1 = self._get_dynamic_fee_rate(leg1_price)
                                 fee2 = self._get_dynamic_fee_rate(best_ask)
@@ -880,8 +895,10 @@ class LiveTrader:
                             return first
                     return None
 
-        if results:
+        if len(results) == 2:
             print(f"✅ Both legs placed for {signal.strategy}: {signal.coin}", flush=True)
+        elif len(results) == 1:
+            print(f"⚠️ Only 1 of 2 legs placed for {signal.strategy}: {signal.coin}", flush=True)
         return results[0] if results else None
 
     def _get_dynamic_fee_rate(self, price: float) -> float:
@@ -1100,7 +1117,8 @@ class LiveTrader:
             print(f"❌ Order error: {e}", flush=True)
 
             # ── FOK didn't fill: try GTC fallback ──
-            if use_fok and ('not fill' in error_str or 'no fill' in error_str):
+            if use_fok and ('not fill' in error_str or 'no fill' in error_str
+                           or 'fully filled' in error_str or 'killed' in error_str):
                 # Pre-check: can we afford 5 shares at this price for GTC?
                 tick_price = max(0.01, min(0.99, round(signal.entry_price * 100) / 100))
                 gtc_cost = round(tick_price * 5, 2)

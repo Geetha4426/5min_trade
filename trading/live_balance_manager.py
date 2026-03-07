@@ -61,8 +61,8 @@ LIVE_MODES = {
         reserve_min=2.0,        # Always keep $2
         max_pos_per_dollar=0.5, # 1 position per $2
         max_positions_cap=3,    # 3 positions max
-        min_confidence=0.90,    # Same high bar as SEED — only best signals
-        description='$5-15 — SEED confidence with dynamic $2-4 sizing',
+        min_confidence=0.85,    # High bar — allows spike_fade, early_mover, binance_momentum
+        description='$5-15 — growth mode with high-confidence signals',
     ),
     'concentration': LiveRiskMode(
         name='CONCENTRATION',
