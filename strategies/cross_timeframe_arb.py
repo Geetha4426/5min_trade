@@ -56,6 +56,30 @@ class CrossTimeframeArbStrategy(BaseStrategy):
     # Minimum depth on both sides (avoid thin markets)
     MIN_DEPTH = 2.0  # $2
 
+    # Expected order size per leg — used for fillable price calculation
+    EXPECTED_LEG_SIZE = 1.0  # $1 per leg in SEED/PLANT
+
+    @staticmethod
+    def _fillable_price(book: dict, size_usd: float) -> tuple:
+        """Calculate the price needed to fill `size_usd` from ask side.
+        
+        Walks the orderbook asks to find the worst price we'd pay
+        to fully fill our order. Returns (fillable_price, fillable).
+        If not enough depth, returns (worst_ask_seen, False).
+        """
+        asks = book.get('asks', [])  # [(price, size), ...] sorted ascending
+        if not asks:
+            return (book.get('best_ask', 1.0), False)
+        remaining = size_usd
+        worst_price = asks[0][0]
+        for price, shares in asks:
+            level_value = price * shares
+            worst_price = price
+            remaining -= level_value
+            if remaining <= 0:
+                return (price, True)
+        return (worst_price, False)
+
     # The 15-min market should have 3-7 minutes remaining (overlap window)
     OVERLAP_MIN_SECS = 120   # 2 min — need enough execution time
     OVERLAP_MAX_SECS = 420   # 7 min — the 5-min market just opened
@@ -175,50 +199,72 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         if not all([longer_up_book, longer_dn_book, shorter_up_book, shorter_dn_book]):
             return None
 
-        # === FIND THE BEST COMBINATION (FEE-AWARE) ===
-        # Apply dynamic taker fee on each leg (quadratic formula)
+        # === FIND THE BEST COMBINATION (FEE-AWARE + DEPTH-AWARE) ===
+        # Use fillable price (worst price needed to fill our order size)
+        # instead of best_ask, which may have only 1 share available.
+        ctx = longer_entry.get('context', {})
+        balance_mgr = ctx.get('balance_mgr')
+        leg_size = self.EXPECTED_LEG_SIZE
+        if balance_mgr:
+            leg_size = max(leg_size, balance_mgr.get_position_size(0.95) / 2)
+
+        # Fillable prices: realistic prices we'd actually get filled at
+        a_p1_fill, a_p1_ok = self._fillable_price(longer_up_book, leg_size)
+        a_p2_fill, a_p2_ok = self._fillable_price(shorter_dn_book, leg_size)
+        b_p1_fill, b_p1_ok = self._fillable_price(longer_dn_book, leg_size)
+        b_p2_fill, b_p2_ok = self._fillable_price(shorter_up_book, leg_size)
 
         # Option A: Buy UP on longer + DOWN on shorter
-        combo_a_cost = longer_up_book['best_ask'] + shorter_dn_book['best_ask']
-        combo_a_fee_1 = self._dynamic_fee(longer_up_book['best_ask'])
-        combo_a_fee_2 = self._dynamic_fee(shorter_dn_book['best_ask'])
-        combo_a_fees = (longer_up_book['best_ask'] * combo_a_fee_1 +
-                        shorter_dn_book['best_ask'] * combo_a_fee_2)
+        combo_a_cost = a_p1_fill + a_p2_fill
+        combo_a_fee_1 = self._dynamic_fee(a_p1_fill)
+        combo_a_fee_2 = self._dynamic_fee(a_p2_fill)
+        combo_a_fees = (a_p1_fill * combo_a_fee_1 + a_p2_fill * combo_a_fee_2)
         combo_a_profit = 1.0 - combo_a_cost - combo_a_fees
+        combo_a_fillable = a_p1_ok and a_p2_ok
 
         # Option B: Buy DOWN on longer + UP on shorter
-        combo_b_cost = longer_dn_book['best_ask'] + shorter_up_book['best_ask']
-        combo_b_fee_1 = self._dynamic_fee(longer_dn_book['best_ask'])
-        combo_b_fee_2 = self._dynamic_fee(shorter_up_book['best_ask'])
-        combo_b_fees = (longer_dn_book['best_ask'] * combo_b_fee_1 +
-                        shorter_up_book['best_ask'] * combo_b_fee_2)
+        combo_b_cost = b_p1_fill + b_p2_fill
+        combo_b_fee_1 = self._dynamic_fee(b_p1_fill)
+        combo_b_fee_2 = self._dynamic_fee(b_p2_fill)
+        combo_b_fees = (b_p1_fill * combo_b_fee_1 + b_p2_fill * combo_b_fee_2)
         combo_b_profit = 1.0 - combo_b_cost - combo_b_fees
+        combo_b_fillable = b_p1_ok and b_p2_ok
 
         # Pick the most profitable combination
-        if combo_a_profit >= combo_b_profit:
+        # Prefer combos where BOTH legs are fillable at our size
+        if combo_a_fillable and not combo_b_fillable:
+            pick_a = True
+        elif combo_b_fillable and not combo_a_fillable:
+            pick_a = False
+        else:
+            pick_a = combo_a_profit >= combo_b_profit
+
+        if pick_a:
             best_combo = 'A'
             combined_cost = combo_a_cost
             profit = combo_a_profit
+            both_fillable = combo_a_fillable
             # We buy UP on longer, DOWN on shorter
             primary_side = 'UP'
             primary_token = longer_mkt['up_token_id']
-            primary_price = longer_up_book['best_ask']
+            primary_price = a_p1_fill
             hedge_side = 'DOWN'
             hedge_token = shorter_mkt['down_token_id']
-            hedge_price = shorter_dn_book['best_ask']
+            hedge_price = a_p2_fill
             primary_depth = longer_up_book.get('ask_depth', 0)
             hedge_depth = shorter_dn_book.get('ask_depth', 0)
         else:
             best_combo = 'B'
             combined_cost = combo_b_cost
             profit = combo_b_profit
+            both_fillable = combo_b_fillable
             # We buy DOWN on longer, UP on shorter
             primary_side = 'DOWN'
             primary_token = longer_mkt['down_token_id']
-            primary_price = longer_dn_book['best_ask']
+            primary_price = b_p1_fill
             hedge_side = 'UP'
             hedge_token = shorter_mkt['up_token_id']
-            hedge_price = shorter_up_book['best_ask']
+            hedge_price = b_p2_fill
             primary_depth = longer_dn_book.get('ask_depth', 0)
             hedge_depth = shorter_up_book.get('ask_depth', 0)
 
@@ -231,9 +277,14 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         if profit < min_profit:
             return None
 
-        # Check liquidity
+        # Check liquidity — both total depth and fillability at our size
         min_depth = min(primary_depth, hedge_depth)
         if min_depth < self.MIN_DEPTH:
+            return None
+
+        # If neither combo is fillable at our order size, skip
+        # (prevents FOK kills from thin top-of-book)
+        if not both_fillable:
             return None
 
         # Confidence scales with profit margin

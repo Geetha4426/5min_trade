@@ -786,19 +786,64 @@ class LiveTrader:
                     was_fok = first.get('order_type') == 'FOK'
                     if was_fok:
                         # FOK fills instantly on-chain — can't cancel.
-                        # Keep the position tracked; exit logic will hold to settlement.
-                        print(f"⚠️ Leg 2 failed, leg 1 FOK filled — keeping as single-leg hold: "
+                        # ── ADAPTIVE RETRY: fetch current best ask, check if
+                        # arb is still profitable, retry FOK at market price ──
+                        retry_result = None
+                        try:
+                            book = self.clob_client.get_order_book(tid)
+                            asks = book.get('asks', []) if book else []
+                            if asks:
+                                best_ask = max(0.01, min(0.99, round(float(asks[0]['price']) * 100) / 100))
+                                leg1_price = first['entry_price']
+                                fee1 = self._get_dynamic_fee_rate(leg1_price)
+                                fee2 = self._get_dynamic_fee_rate(best_ask)
+                                total_effective = leg1_price * (1 + fee1) + best_ask * (1 + fee2)
+                                arb_edge = 1.0 - total_effective
+
+                                if arb_edge > 0.02:  # Min 2% edge after fees
+                                    # Budget: original half + savings from cheap leg 1
+                                    retry_budget = max(
+                                        Config.POLYMARKET_MIN_ORDER_SIZE,
+                                        total_size - first['size_usd']
+                                    )
+                                    print(f"🔄 Retry leg 2: {side} @ ${best_ask:.3f} "
+                                          f"(was ${price:.3f}) — edge {arb_edge*100:.1f}% | "
+                                          f"budget ${retry_budget:.2f}", flush=True)
+                                    retry_sub = TradeSignal(
+                                        strategy=signal.strategy,
+                                        coin=signal.coin,
+                                        timeframe=signal.timeframe,
+                                        direction=side,
+                                        token_id=tid,
+                                        market_id=mid,
+                                        entry_price=best_ask,
+                                        confidence=signal.confidence,
+                                        rationale=f"[Retry Leg 2] {signal.rationale}",
+                                        metadata={**meta, 'is_dual_leg': True, 'leg_number': i+1},
+                                    )
+                                    retry_result = await self._place_buy(
+                                        retry_sub, retry_budget, use_fok=True)
+                                else:
+                                    print(f"⚠️ Retry skip: edge {arb_edge*100:.1f}% too thin "
+                                          f"at ${best_ask:.3f}", flush=True)
+                            else:
+                                print(f"⚠️ Retry skip: no asks in orderbook", flush=True)
+                        except Exception as retry_err:
+                            print(f"⚠️ Retry leg 2 error: {retry_err}", flush=True)
+
+                        if retry_result:
+                            results.append(retry_result)
+                            break  # Both legs filled — exit loop
+
+                        # Retry failed or unprofitable — orphan leg 1, hold to settlement
+                        print(f"⚠️ Leg 2 retry exhausted — keeping leg 1 as hold: "
                               f"{first['coin']} {first['direction']}", flush=True)
-                        # Position stays in self.positions, open_positions stays incremented,
-                        # balance stays deducted, _estimated_position_value stays updated.
-                        # The arb hold logic (is_dual_leg) will NOT trigger since only 1 leg,
-                        # so mark it for settlement hold explicitly.
                         if first['id'] in self.positions:
                             self.positions[first['id']]['metadata'] = {
                                 **(self.positions[first['id']].get('metadata') or {}),
                                 'orphaned_leg': True,
                             }
-                        return first  # Return as single-leg trade
+                        return first
                     else:
                         # GTC order may not have filled — try to cancel
                         try:
