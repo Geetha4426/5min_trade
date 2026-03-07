@@ -65,6 +65,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("cheaphunter", self.cmd_cheaphunter))
         self.app.add_handler(CommandHandler("redeem", self.cmd_redeem))
         self.app.add_handler(CommandHandler("logs", self.cmd_logs))
+        self.app.add_handler(CommandHandler("automigrate", self.cmd_automigrate))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -496,6 +497,9 @@ class TelegramBot:
         if args:
             risk = args[0].lower()
             ok, msg = self.engine.set_risk_mode(risk)
+            if ok:
+                self.engine.live_balance_mgr.auto_migrate = False
+                msg += "\n🔒 Auto-migrate OFF (mode locked to your choice)"
             await update.message.reply_text(msg)
             return
 
@@ -765,6 +769,45 @@ class TelegramBot:
             )
         await update.message.reply_text('\n'.join(lines))
 
+    async def cmd_automigrate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle auto-migration (auto-graduate + auto-demote).
+        
+        Usage:
+          /automigrate       — show current status + toggle
+          /automigrate on    — enable auto-migrate
+          /automigrate off   — disable (lock current mode)
+        """
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not initialized")
+            return
+
+        mgr = self.engine.live_balance_mgr
+        args = context.args
+        if args:
+            arg = args[0].lower()
+            if arg in ('on', 'true', '1', 'yes'):
+                mgr.auto_migrate = True
+            elif arg in ('off', 'false', '0', 'no'):
+                mgr.auto_migrate = False
+            else:
+                await update.message.reply_text("❌ Usage: /automigrate [on|off]")
+                return
+        else:
+            # Toggle
+            mgr.auto_migrate = not mgr.auto_migrate
+
+        status = "ON ✅" if mgr.auto_migrate else "OFF 🔒"
+        mode = f"{mgr.mode.emoji} {mgr.mode.name}"
+        msg = (
+            f"🔄 Auto-Migrate: {status}\n\n"
+            f"Current mode: {mode}\n"
+        )
+        if mgr.auto_migrate:
+            msg += "Mode will auto-graduate/demote based on balance."
+        else:
+            msg += f"Mode locked to {mode} — won't change with balance."
+        await update.message.reply_text(msg)
+
     async def cmd_cheaphunter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Toggle Cheap Hunter lottery mode.
         
@@ -983,6 +1026,10 @@ class TelegramBot:
         risk_mode = data.replace('risk_', '')
         if self.engine:
             ok, msg = self.engine.set_risk_mode(risk_mode)
+            if ok:
+                # User explicitly chose a mode — lock it (disable auto-migrate)
+                self.engine.live_balance_mgr.auto_migrate = False
+                msg += "\n🔒 Auto-migrate OFF (mode locked to your choice)"
             await query.edit_message_text(msg)
         else:
             await query.edit_message_text("⚠️ Engine not initialized")

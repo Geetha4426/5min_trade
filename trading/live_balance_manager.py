@@ -163,6 +163,11 @@ class LiveBalanceManager:
         # preventing false triggers when USDC drops after a buy.
         self._estimated_position_value: float = 0.0
 
+        # ── Auto-migrate toggle ──
+        # When True (default): auto-graduate and auto-demote based on balance.
+        # When False: mode stays locked to user's choice via /risk or /seed.
+        self.auto_migrate: bool = True
+
     def set_mode(self, mode: str):
         """Switch risk mode."""
         mode = mode.lower()
@@ -277,7 +282,7 @@ class LiveBalanceManager:
                     if self._session_paused_until == 0:
                         self._session_paused_until = now + 300  # 5 min pause
                         print(f"\n{'='*60}", flush=True)
-                        print(f"🚨 SESSION BREAKER: -{session_loss_pct:.0f}% loss in SEED mode", flush=True)
+                        print(f"🚨 SESSION BREAKER: -{session_loss_pct:.0f}% loss in {self.mode.name} mode", flush=True)
                         print(f"  ${self._session_start_balance:.2f} → ${effective_balance:.2f} "
                               f"(USDC ${self.balance:.2f} + positions ~${self._estimated_position_value:.2f})", flush=True)
                         print(f"  Pausing for 5 minutes to break the losing streak.", flush=True)
@@ -360,6 +365,9 @@ class LiveBalanceManager:
         Progression: seed → concentration → medium → aggressive
         Returns message if graduated, empty string if not.
         """
+        if not self.auto_migrate:
+            return ''
+
         grad = GRADUATION_THRESHOLDS.get(self.mode_name)
         if grad:
             next_mode, threshold = grad
@@ -377,12 +385,18 @@ class LiveBalanceManager:
         Auto-demote to a lower tier if balance dropped below the current tier's entry.
         Ensures the bot restarts in the correct mode after drawdowns.
         
+        Uses effective balance (USDC + estimated position value) to avoid
+        false demotions when USDC drops purely from buying, not losing.
+        
         Demotion thresholds (reverse of graduation):
           aggressive → medium  if balance < $100
           medium → concentration  if balance < $20
           concentration → seed  if balance < $5
           seed stays seed (lowest tier)
         """
+        if not self.auto_migrate:
+            return ''
+
         DEMOTION = {
             'aggressive': ('medium', 100.0),
             'medium': ('concentration', 20.0),
@@ -392,7 +406,10 @@ class LiveBalanceManager:
         demote = DEMOTION.get(self.mode_name)
         if demote:
             lower_mode, threshold = demote
-            if self.balance < threshold:
+            # Use effective balance: USDC + open position value
+            # Prevents false demotion after buying (USDC drops but total value unchanged)
+            effective = self.balance + self._estimated_position_value
+            if effective < threshold:
                 old_name = self.mode.name
                 self.set_mode(lower_mode)
                 # Recursively check if we need to demote further

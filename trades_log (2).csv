@@ -1,0 +1,7 @@
+timestamp,epoch,event,coin,direction,timeframe,strategy,order_type,entry_price,exit_price,shares,cost_usd,pnl_gross,pnl_net,fees,pnl_pct,balance_after,mode,confidence,reason,market_id,trade_id,duration_secs,win_streak,loss_streak,size_multiplier
+2026-03-07T06:55:03.878131Z,1772866503,BUY,BTC,UP,15,cross_tf_arb,FOK,0.0200,,50.00,1.00,,,,,4.42,PLANT,0.990,,1513371,1b411bde,,0,0,1.00
+2026-03-07T06:55:04.334708Z,1772866504,BUY,BTC,DOWN,15,cross_tf_arb,FOK,0.4900,,3.00,1.47,,,,,2.95,PLANT,0.990,,1513436,8533ba65,,0,0,1.00
+2026-03-07T07:10:13.683800Z,1772867413,BUY,BTC,UP,15,cross_tf_arb,FOK,0.0200,,50.00,1.00,,,,,4.91,PLANT,0.990,,1513439,e04247d9,,0,0,1.00
+2026-03-07T07:10:15.382359Z,1772867415,BUY,ETH,UP,15,cross_tf_arb,FOK,0.0700,,15.00,1.05,,,,,4.86,PLANT,0.990,,1513442,f1cc5460,,0,0,1.00
+2026-03-07T07:10:16.939575Z,1772867416,BUY,SOL,UP,15,cross_tf_arb,FOK,0.2700,,4.00,1.08,,,,,4.83,PLANT,0.990,,1513445,f18cfec4,,0,0,1.00
+2026-03-07T07:10:17.465196Z,1772867417,BUY,SOL,DOWN,15,cross_tf_arb,FOK,0.6200,,2.00,1.24,,,,,3.59,PLANT,0.990,,1513510,2aa4b13b,,0,0,1.00

@@ -780,18 +780,52 @@ class LiveTrader:
             if result:
                 results.append(result)
             else:
-                # If first leg succeeds but second fails, cancel the first
+                # If first leg succeeds but second fails, handle the orphan
                 if results:
                     first = results[0]
-                    try:
-                        self.clob_client.cancel(first.get('order_id', ''))
-                        print(f"⚠️ Leg 2 failed, cancelled leg 1: {first['order_id']}", flush=True)
-                    except Exception as cancel_err:
-                        # FOK orders fill instantly — can't cancel, need to track as orphan
-                        print(f"⚠️ Leg 2 failed, couldn't cancel leg 1 (FOK filled?): {cancel_err}", flush=True)
-                    # ALWAYS refund balance — even if cancel fails (position tracked separately)
-                    self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
-                    self.balance_mgr.update_balance(self.balance_mgr.balance + first['size_usd'])
+                    was_fok = first.get('order_type') == 'FOK'
+                    if was_fok:
+                        # FOK fills instantly on-chain — can't cancel.
+                        # Keep the position tracked; exit logic will hold to settlement.
+                        print(f"⚠️ Leg 2 failed, leg 1 FOK filled — keeping as single-leg hold: "
+                              f"{first['coin']} {first['direction']}", flush=True)
+                        # Position stays in self.positions, open_positions stays incremented,
+                        # balance stays deducted, _estimated_position_value stays updated.
+                        # The arb hold logic (is_dual_leg) will NOT trigger since only 1 leg,
+                        # so mark it for settlement hold explicitly.
+                        if first['id'] in self.positions:
+                            self.positions[first['id']]['metadata'] = {
+                                **(self.positions[first['id']].get('metadata') or {}),
+                                'orphaned_leg': True,
+                            }
+                        return first  # Return as single-leg trade
+                    else:
+                        # GTC order may not have filled — try to cancel
+                        try:
+                            self.clob_client.cancel(first.get('order_id', ''))
+                            print(f"⚠️ Leg 2 failed, cancelled leg 1 GTC: {first['order_id']}", flush=True)
+                            self.balance_mgr.open_positions = max(0, self.balance_mgr.open_positions - 1)
+                            self.balance_mgr.update_balance(self.balance_mgr.balance + first['size_usd'])
+                            self.balance_mgr._estimated_position_value = max(
+                                0, self.balance_mgr._estimated_position_value - first['size_usd'])
+                            # Remove from tracking
+                            for tid, pos in list(self.positions.items()):
+                                if pos.get('order_id') == first.get('order_id'):
+                                    del self.positions[tid]
+                                    break
+                            for tid, pos in list(self.pending_orders.items()):
+                                if pos.get('order_id') == first.get('order_id'):
+                                    del self.pending_orders[tid]
+                                    break
+                        except Exception as cancel_err:
+                            # GTC cancel also failed — treat like FOK (keep position)
+                            print(f"⚠️ Leg 2 failed, couldn't cancel leg 1: {cancel_err}", flush=True)
+                            if first['id'] in self.positions:
+                                self.positions[first['id']]['metadata'] = {
+                                    **(self.positions[first['id']].get('metadata') or {}),
+                                    'orphaned_leg': True,
+                                }
+                            return first
                     return None
 
         if results:
@@ -983,6 +1017,10 @@ class LiveTrader:
 
             self.balance_mgr.open_positions += 1
             self.balance_mgr.update_balance(self.balance_mgr.balance - actual_cost)
+
+            # Update estimated position value so session breaker doesn't
+            # false-trigger on USDC drop from buying (not losing).
+            self.balance_mgr._estimated_position_value += actual_cost
 
             # Also update cached real balance
             if self._cached_real_balance is not None:
@@ -1325,6 +1363,12 @@ class LiveTrader:
         # Covers: cross_tf_arb, yes_no_arb, straddle, cheap_hunter both-sides.
         meta = (pos.get('metadata') or {}) if pos else {}
         if meta.get('is_dual_leg'):
+            return 'hold'
+
+        # Orphaned leg: leg 2 of arb failed, this leg is filled on-chain.
+        # Hold to settlement — selling early costs fees and throws away
+        # the chance of settlement at $1.00.
+        if meta.get('orphaned_leg'):
             return 'hold'
 
         # Entry fee: stored per-position at buy time
