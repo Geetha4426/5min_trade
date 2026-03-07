@@ -1318,12 +1318,13 @@ class LiveTrader:
         if entry_price <= 0:
             return 'hold'
 
-        # ── ARB LEGS: ALWAYS HOLD TO SETTLEMENT ──
-        # Arb strategies profit from settlement payout ($1.00), not price movement.
-        # Selling one leg early breaks the hedge → turns safe arb into naked risk.
-        # Settlement is FREE (0% fee) vs selling which costs 1-4%.
-        # One side ALWAYS settles to $1 → combined payout is guaranteed.
-        if strategy in ('cross_tf_arb', 'yes_no_arb'):
+        # ── DUAL-LEG (ARB/STRADDLE): ALWAYS HOLD TO SETTLEMENT ──
+        # Dual-leg strategies buy BOTH sides → one ALWAYS settles to $1.00.
+        # Selling one leg early breaks the hedge → safe arb becomes naked risk.
+        # Settlement is FREE (0% fee) vs selling costs 1-4%.
+        # Covers: cross_tf_arb, yes_no_arb, straddle, cheap_hunter both-sides.
+        meta = (pos.get('metadata') or {}) if pos else {}
+        if meta.get('is_dual_leg'):
             return 'hold'
 
         # Entry fee: stored per-position at buy time
@@ -1339,6 +1340,14 @@ class LiveTrader:
         max_payout_gain = 1.0 / (entry_price * (1 + entry_fee))
         # How much current gain as fraction of max possible
         gain_captured = (net_gain - 1) / (max_payout_gain - 1) if max_payout_gain > 1 else 0
+
+        # ── SPREAD SCALPER: Quick exit at captured spread ──
+        # spread_scalper profits from bid-ask spread (target ~8-15% gain).
+        # Generic thresholds (30-40%) are too high — the spread closes before
+        # those trigger, so the position drifts to random settlement.
+        # 8% matches the strategy's minimum entry filter (spread/2 > 7% of ask).
+        if strategy == 'spread_scalper' and pnl_pct >= 8:
+            return 'sell'
 
         mode = self.balance_mgr.mode_name
 
