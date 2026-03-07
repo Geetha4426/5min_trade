@@ -1318,6 +1318,14 @@ class LiveTrader:
         if entry_price <= 0:
             return 'hold'
 
+        # ── ARB LEGS: ALWAYS HOLD TO SETTLEMENT ──
+        # Arb strategies profit from settlement payout ($1.00), not price movement.
+        # Selling one leg early breaks the hedge → turns safe arb into naked risk.
+        # Settlement is FREE (0% fee) vs selling which costs 1-4%.
+        # One side ALWAYS settles to $1 → combined payout is guaranteed.
+        if strategy in ('cross_tf_arb', 'yes_no_arb'):
+            return 'hold'
+
         # Entry fee: stored per-position at buy time
         entry_fee = fee_rate if fee_rate is not None else self._get_dynamic_fee_rate(entry_price)
         # Sell fee: calculated at CURRENT price (sell fee depends on sell price)
