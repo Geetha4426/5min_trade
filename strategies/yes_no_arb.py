@@ -24,6 +24,22 @@ class YesNoArbStrategy(BaseStrategy):
     def __init__(self):
         self.max_combined = Config.ARB_MAX_COMBINED_PRICE
 
+    @staticmethod
+    def _fillable_price(book: dict, size_usd: float) -> tuple:
+        """Walk orderbook asks to find realistic fill price for order size.
+        Returns (fill_price, is_fillable)."""
+        asks = book.get('asks', [])  # [(price, size), ...] sorted ascending
+        if not asks:
+            return (book.get('best_ask', 1.0), False)
+        remaining = size_usd
+        worst_price = asks[0][0]
+        for price, shares in asks:
+            worst_price = price
+            remaining -= price * shares
+            if remaining <= 0:
+                return (price, True)
+        return (worst_price, False)
+
     async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
         """Check if YES + NO < threshold for arbitrage."""
         clob = context.get('clob')
@@ -54,7 +70,25 @@ class YesNoArbStrategy(BaseStrategy):
             if min_depth < 2:  # Need at least $2 depth
                 return None
 
-            confidence = min(0.99, 0.85 + profit * 2)
+            # Depth-aware: verify both legs are fillable at our actual order size
+            balance_mgr = context.get('balance_mgr')
+            leg_size = 1.0  # default per-leg budget
+            if balance_mgr:
+                leg_size = max(leg_size, balance_mgr.get_position_size(0.95) / 2)
+
+            up_fill, up_ok = self._fillable_price(dual_book['up'], leg_size)
+            dn_fill, dn_ok = self._fillable_price(dual_book['down'], leg_size)
+
+            if not (up_ok and dn_ok):
+                return None  # Not enough depth to fill both legs
+
+            # Recalculate profit at realistic fill prices (not just best_ask)
+            real_combined = up_fill + dn_fill
+            real_profit = 1.0 - real_combined
+            if real_profit < 0.01:
+                return None  # No profitable arb at realistic fill prices
+
+            confidence = min(0.99, 0.85 + real_profit * 2)
 
             return TradeSignal(
                 strategy=self.name,
@@ -63,18 +97,18 @@ class YesNoArbStrategy(BaseStrategy):
                 direction='BOTH',  # Special: buy both sides
                 token_id=f"{up_token}|{down_token}",  # Both tokens
                 market_id=market['market_id'],
-                entry_price=combined,
+                entry_price=real_combined,
                 confidence=confidence,
                 rationale=(
                     f"💰 YES+NO ARB: {market['coin']} {market['timeframe']}m — "
-                    f"Up@{up_ask:.4f} + Down@{down_ask:.4f} = {combined:.4f}. "
-                    f"Guaranteed profit: ${profit:.4f} per share!"
+                    f"Up@{up_fill:.4f} + Down@{dn_fill:.4f} = {real_combined:.4f}. "
+                    f"Guaranteed profit: ${real_profit:.4f} per share!"
                 ),
                 metadata={
-                    'up_ask': up_ask,
-                    'down_ask': down_ask,
-                    'combined': combined,
-                    'profit_per_share': profit,
+                    'up_ask': up_fill,
+                    'down_ask': dn_fill,
+                    'combined': real_combined,
+                    'profit_per_share': real_profit,
                     'min_depth': min_depth,
                 }
             )

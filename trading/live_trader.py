@@ -790,10 +790,10 @@ class LiveTrader:
                         # arb is still profitable, retry FOK at market price ──
                         retry_result = None
                         try:
-                            book = self.clob_client.get_order_book(tid)
+                            book = self.clob_reader.get_orderbook(tid) if self.clob_reader else None
                             asks = book.get('asks', []) if book else []
                             if asks:
-                                best_ask = max(0.01, min(0.99, round(float(asks[0]['price']) * 100) / 100))
+                                best_ask = max(0.01, min(0.99, round(asks[0][0] * 100) / 100))
                                 leg1_price = first['entry_price']
                                 fee1 = self._get_dynamic_fee_rate(leg1_price)
                                 fee2 = self._get_dynamic_fee_rate(best_ask)
