@@ -81,7 +81,7 @@ class Config:
     # ═══════════════════════════════════════════════════════════════════
     # COINS
     # ═══════════════════════════════════════════════════════════════════
-    ENABLED_COINS = [c.strip().upper() for c in os.getenv('ENABLED_COINS', 'BTC,ETH,SOL').split(',')]
+    ENABLED_COINS = [c.strip().upper() for c in os.getenv('ENABLED_COINS', 'BTC,ETH').split(',')]
 
     # Binance symbol mapping
     BINANCE_SYMBOLS = {

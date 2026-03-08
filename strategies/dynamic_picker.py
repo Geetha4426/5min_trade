@@ -39,58 +39,120 @@ from strategies.cross_timeframe_arb import CrossTimeframeArbStrategy
 from strategies.volatility_penny_sniper import VolatilityPennySniperStrategy
 from strategies.probability_closer import ProbabilityCloserStrategy
 from strategies.swing_scalpers import (
-    MeanReversionScalper, SpikeFade, ExpiryRush, BinanceMomentumSniper
+    MeanReversionScalper, SpikeFade, ExpiryRush, BinanceMomentumSniper,
+    OrderbookImbalance
 )
 from strategies.early_mover import EarlyMoverStrategy
 
 
 class StrategyTracker:
-    """Tracks win/loss record per strategy for performance-based selection.
-    
-    Inspired by ThinkEnigmatic/bot-arena's Bayesian learning and PolyFlup's
-    A/B confidence testing. Simple but effective: strategies with better
-    track records get a confidence boost, underperformers get penalized.
+    """Tracks win/loss record per strategy with GRADUAL deprioritization.
+
+    Key design:
+    - Penalty grows slowly: -0.02 per consecutive loss, capped at -0.12
+    - Boost grows slowly: +0.03 per consecutive win, capped at +0.15
+    - A single win resets the loss streak (and vice versa)
+    - RESET MECHANISM: after 50 scans without being picked, the strategy
+      gets a "trial run" — adjustment set to 0 for one signal. If it wins,
+      it's rehabilitated. If it loses, penalty resumes from previous level.
+    - DECAY: every 20 trades (global), oldest result decays by 50%,
+      preventing permanent blacklisting from early bad luck.
     """
 
-    MIN_TRADES_FOR_ADJUSTMENT = 5  # Need at least 5 trades before adjusting
-    MAX_BOOST = 0.15               # Max confidence boost for best strategy
-    MAX_PENALTY = -0.10            # Max penalty for worst strategy
+    MAX_BOOST = 0.15
+    MAX_PENALTY = -0.12
+    LOSS_STEP = -0.02          # Penalty per consecutive loss
+    WIN_STEP = 0.03            # Boost per consecutive win
+    MIN_TRADES = 3             # Start adjusting after 3 trades
+    RESET_SCANS = 50           # Trial reset after 50 idle scans
+    DECAY_INTERVAL = 20        # Decay old results every 20 global trades
 
     def __init__(self):
-        # {strategy_name: {'wins': int, 'losses': int, 'total_pnl': float}}
         self.records: Dict[str, Dict] = {}
+        self._global_trades = 0
+        self._idle_scans: Dict[str, int] = {}   # strategy -> scans since last picked
+        self._on_trial: Dict[str, bool] = {}     # strategy -> currently on trial reset
 
     def record(self, strategy_name: str, won: bool, pnl: float = 0.0):
         """Record a trade result for a strategy."""
         if strategy_name not in self.records:
-            self.records[strategy_name] = {'wins': 0, 'losses': 0, 'total_pnl': 0.0}
+            self.records[strategy_name] = {
+                'wins': 0, 'losses': 0, 'total_pnl': 0.0,
+                'win_streak': 0, 'loss_streak': 0,
+            }
         rec = self.records[strategy_name]
         if won:
             rec['wins'] += 1
+            rec['win_streak'] += 1
+            rec['loss_streak'] = 0
         else:
             rec['losses'] += 1
+            rec['loss_streak'] += 1
+            rec['win_streak'] = 0
         rec['total_pnl'] += pnl
 
+        # Reset idle scan counter (strategy was just used)
+        self._idle_scans[strategy_name] = 0
+
+        # Handle trial outcome
+        if self._on_trial.get(strategy_name):
+            self._on_trial[strategy_name] = False
+            if won:
+                # Trial success — rehabilitate: halve old loss streak
+                rec['loss_streak'] = max(0, rec['loss_streak'] // 2)
+
+        # Global decay: every DECAY_INTERVAL trades, shrink all records
+        self._global_trades += 1
+        if self._global_trades % self.DECAY_INTERVAL == 0:
+            self._decay_all()
+
+    def _decay_all(self):
+        """Decay old results by 50% so strategies aren't permanently killed."""
+        for rec in self.records.values():
+            rec['wins'] = max(0, int(rec['wins'] * 0.5))
+            rec['losses'] = max(0, int(rec['losses'] * 0.5))
+
+    def mark_scanned(self, strategy_name: str):
+        """Call once per scan cycle for strategies not picked."""
+        self._idle_scans[strategy_name] = self._idle_scans.get(strategy_name, 0) + 1
+
     def get_adjustment(self, strategy_name: str) -> float:
-        """Get confidence adjustment for a strategy based on track record.
-        
-        Returns a value between MAX_PENALTY and MAX_BOOST.
-        Strategies with too few trades get 0 (no adjustment).
+        """Get confidence adjustment — gradual, streak-based.
+
+        Loss streak:  -0.02 * streak  (capped -0.12)
+        Win streak:   +0.03 * streak  (capped +0.15)
+        On trial:     0.0 (fresh chance)
         """
+        # Trial reset: if idle too long, give a free pass
+        if self._idle_scans.get(strategy_name, 0) >= self.RESET_SCANS:
+            self._on_trial[strategy_name] = True
+            self._idle_scans[strategy_name] = 0
+            return 0.0
+
+        if self._on_trial.get(strategy_name):
+            return 0.0
+
         rec = self.records.get(strategy_name)
         if not rec:
             return 0.0
         total = rec['wins'] + rec['losses']
-        if total < self.MIN_TRADES_FOR_ADJUSTMENT:
+        if total < self.MIN_TRADES:
             return 0.0
 
-        win_rate = rec['wins'] / total
-        # Center at 50% — above gets boost, below gets penalty
-        # Scale: 80% win rate → +0.15, 20% win rate → -0.10
-        if win_rate >= 0.5:
-            return self.MAX_BOOST * (win_rate - 0.5) / 0.5
+        loss_streak = rec.get('loss_streak', 0)
+        win_streak = rec.get('win_streak', 0)
+
+        if loss_streak > 0:
+            return max(self.MAX_PENALTY, self.LOSS_STEP * loss_streak)
+        elif win_streak > 0:
+            return min(self.MAX_BOOST, self.WIN_STEP * win_streak)
         else:
-            return self.MAX_PENALTY * (0.5 - win_rate) / 0.5
+            # No active streak — use win rate for mild adjustment
+            win_rate = rec['wins'] / total
+            if win_rate >= 0.5:
+                return min(0.05, 0.05 * (win_rate - 0.5) / 0.5)
+            else:
+                return max(-0.03, -0.03 * (0.5 - win_rate) / 0.5)
 
     def get_stats(self) -> Dict[str, Dict]:
         """Get all strategy stats for display."""
@@ -104,6 +166,10 @@ class StrategyTracker:
                 'win_rate': (rec['wins'] / total * 100) if total > 0 else 0,
                 'pnl': rec['total_pnl'],
                 'adjustment': self.get_adjustment(name),
+                'loss_streak': rec.get('loss_streak', 0),
+                'win_streak': rec.get('win_streak', 0),
+                'on_trial': self._on_trial.get(name, False),
+                'idle_scans': self._idle_scans.get(name, 0),
             }
         return stats
 
@@ -137,6 +203,7 @@ class DynamicPicker(BaseStrategy):
             StraddleStrategy(),           # Volatility play
             SpreadScalper(),              # Bid-ask profit
             TimeDecayStrategy(),          # Near-expiry
+            OrderbookImbalance(),         # Depth-ratio directional signal (NEW)
         ]
         # Strategy win rate tracker (learns from results)
         self.tracker = StrategyTracker()
@@ -196,7 +263,7 @@ class DynamicPicker(BaseStrategy):
             elif sig_type == 'spike_fade':
                 s.confidence = min(0.93, s.confidence + 0.10)  # High priority: fade extremes
             elif sig_type == 'expiry_rush':
-                s.confidence = min(0.95, s.confidence + 0.12)  # Urgent: time-sensitive
+                s.confidence = min(0.97, s.confidence + 0.18)  # TOP priority: proven winner
             elif sig_type == 'binance_momentum':
                 s.confidence = min(0.94, s.confidence + 0.12)  # High priority: real data edge
             elif sig_type == 'time_decay':
@@ -205,6 +272,8 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.95, s.confidence + 0.10)  # Reversal-confirmed cheap bet
             elif sig_type in ('trend', 'mid_sniper'):
                 s.confidence = min(0.90, s.confidence + 0.05)
+            elif sig_type == 'book_imbalance':
+                s.confidence = min(0.93, s.confidence + 0.08)  # Orderbook signal
 
             # ── Apply strategy win rate adjustment (learning) ──
             track_adj = self.tracker.get_adjustment(s.strategy)
@@ -216,6 +285,10 @@ class DynamicPicker(BaseStrategy):
         best = signals[0]
         best.metadata['alternatives'] = len(signals) - 1
         best.metadata['strategies_checked'] = len(self.strategies)
+
+        # Track idle scans for strategies NOT picked (for reset mechanism)
+        for s in signals[1:]:
+            self.tracker.mark_scanned(s.strategy)
 
         # ── Add spread info for spread guard in execute_signal ──
         # If the strategy didn't compute spread, fetch orderbook here.

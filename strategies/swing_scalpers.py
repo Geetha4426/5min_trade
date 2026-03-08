@@ -596,3 +596,120 @@ class BinanceMomentumSniper(BaseStrategy):
 
     def get_suitable_timeframes(self) -> List[int]:
         return [5, 15, 30]
+
+
+class OrderbookImbalance(BaseStrategy):
+    """Orderbook Imbalance — uses bid/ask depth ratio as directional signal.
+
+    If 75%+ of depth is on bid side → buyers dominating → likely UP.
+    If 75%+ of depth is on ask side → sellers dominating → likely DOWN.
+    Combined with Binance direction for confirmation.
+    """
+
+    name = "book_imbalance"
+    description = "Trade direction of orderbook depth imbalance"
+
+    MIN_IMBALANCE = 0.50       # |imbalance| > 0.50  (75/25 depth split)
+    MIN_TOTAL_DEPTH = 3.0      # $3 total depth minimum (meaningful book)
+    MAX_ENTRY = 0.65           # Don't overpay
+    MIN_ENTRY = 0.08           # Avoid dust
+    MIN_SECONDS = 45           # Need time for move to play out
+    MAX_SECONDS = 240          # Not too early (noise)
+
+    async def analyze(self, market: Dict, context: Dict) -> Optional[TradeSignal]:
+        clob = context.get('clob')
+        binance_feed = context.get('binance_feed')
+        seconds_remaining = context.get('seconds_remaining', 0)
+
+        if not clob:
+            return None
+
+        if seconds_remaining < self.MIN_SECONDS or seconds_remaining > self.MAX_SECONDS:
+            return None
+
+        coin = market['coin']
+        best_signal = None
+        best_conf = 0
+
+        for side, token_key in [('UP', 'up_token_id'), ('DOWN', 'down_token_id')]:
+            token_id = market.get(token_key, '')
+            if not token_id:
+                continue
+
+            book = clob.get_orderbook(token_id)
+            if not book:
+                continue
+
+            imbalance = book.get('imbalance', 0)
+            bid_depth = book.get('bid_depth', 0)
+            ask_depth = book.get('ask_depth', 0)
+            total_depth = bid_depth + ask_depth
+
+            if total_depth < self.MIN_TOTAL_DEPTH:
+                continue
+
+            # For UP side: positive imbalance = more bids = bullish
+            # For DOWN side: negative imbalance = more asks = bearish for UP = bullish for DOWN
+            if side == 'UP' and imbalance < self.MIN_IMBALANCE:
+                continue
+            if side == 'DOWN' and imbalance > -self.MIN_IMBALANCE:
+                continue
+
+            ask = book.get('best_ask', 1.0)
+            if not (self.MIN_ENTRY <= ask <= self.MAX_ENTRY):
+                continue
+
+            abs_imbalance = abs(imbalance)
+            # Base confidence from imbalance strength
+            confidence = min(0.88, 0.55 + abs_imbalance * 0.30)
+
+            # Binance confirmation boost
+            binance_confirms = False
+            if binance_feed:
+                price_hist = binance_feed.price_history.get(coin)
+                if price_hist and len(price_hist) >= 2:
+                    recent_px = [s for s in price_hist if s.timestamp > time.time() - 30]
+                    if len(recent_px) >= 2:
+                        btc_dir = 'UP' if recent_px[-1].price > recent_px[0].price else 'DOWN'
+                        if btc_dir == side:
+                            confidence = min(0.93, confidence + 0.10)
+                            binance_confirms = True
+                        else:
+                            confidence -= 0.05  # Counter-signal
+
+            # Cheaper price = more upside = higher confidence
+            if ask < 0.30:
+                confidence = min(0.93, confidence + 0.03)
+
+            if confidence > best_conf:
+                best_conf = confidence
+                depth_ratio = bid_depth / total_depth if side == 'UP' else ask_depth / total_depth
+                best_signal = TradeSignal(
+                    strategy=self.name,
+                    coin=coin,
+                    timeframe=market['timeframe'],
+                    direction=side,
+                    token_id=token_id,
+                    market_id=market['market_id'],
+                    entry_price=ask,
+                    confidence=confidence,
+                    rationale=(
+                        f"📊 BOOK IMBALANCE: {coin} {side} — "
+                        f"depth ratio {depth_ratio:.0%} "
+                        f"(bid=${bid_depth:.1f} ask=${ask_depth:.1f}). "
+                        f"Binance: {'✅' if binance_confirms else '❌'}. "
+                        f"{seconds_remaining}s left. Buy @ {ask:.3f}"
+                    ),
+                    metadata={
+                        'imbalance': imbalance,
+                        'bid_depth': bid_depth,
+                        'ask_depth': ask_depth,
+                        'binance_confirms': binance_confirms,
+                        'type': 'book_imbalance',
+                    }
+                )
+
+        return best_signal
+
+    def get_suitable_timeframes(self) -> List[int]:
+        return [5, 15]

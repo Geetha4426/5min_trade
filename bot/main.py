@@ -947,18 +947,26 @@ class TelegramBot:
                                        parse_mode='Markdown')
 
     async def cb_coin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle coin selection."""
+        """Handle coin toggle — tap to enable/disable individual coins."""
         query = update.callback_query
         await query.answer()
         coin = query.data.replace('coin_', '')
 
-        if coin == 'ALL':
-            Config.ENABLED_COINS = ['BTC', 'ETH', 'SOL']
+        if coin in Config.ENABLED_COINS:
+            if len(Config.ENABLED_COINS) > 1:
+                Config.ENABLED_COINS.remove(coin)
+            else:
+                await query.answer("Need at least 1 coin enabled!", show_alert=True)
+                return
         else:
-            Config.ENABLED_COINS = [coin]
+            Config.ENABLED_COINS.append(coin)
 
-        await query.edit_message_text(f"Coins: **{', '.join(Config.ENABLED_COINS)}**",
-                                       parse_mode='Markdown')
+        from bot.keyboards.inline import coin_keyboard
+        await query.edit_message_text(
+            f"🪙 **Coins:** {', '.join(Config.ENABLED_COINS)}\n\nTap to toggle:",
+            parse_mode='Markdown',
+            reply_markup=coin_keyboard(Config.ENABLED_COINS)
+        )
 
     async def cb_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle menu command buttons."""

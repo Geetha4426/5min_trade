@@ -1,0 +1,5 @@
+timestamp,epoch,event,coin,direction,timeframe,strategy,order_type,entry_price,exit_price,shares,cost_usd,pnl_gross,pnl_net,fees,pnl_pct,balance_after,mode,confidence,reason,market_id,trade_id,duration_secs,win_streak,loss_streak,size_multiplier
+2026-03-08T08:14:37.365411Z,1772957677,BUY,BTC,DOWN,5,expiry_rush,FOK,0.5000,,2.00,1.00,,,,,0.85,SEED,0.950,,1521896,1468bae2,,0,0,1.00
+2026-03-08T08:20:13.254383Z,1772958013,SETTLE,BTC,DOWN,5,expiry_rush,FOK,0.5000,1.0000,2.00,1.00,1.0000,0.0000,0.0000,0.0,2.82,SEED,0.950,market_settled,1521896,1468bae2,335,0,0,1.00
+2026-03-08T08:25:17.028216Z,1772958317,BUY,SOL,UP,15,cross_tf_arb,FOK,0.1500,,6.80,1.02,,,,,1.80,SEED,0.990,,1522036,e599ca2a,,0,0,1.00
+2026-03-08T08:25:17.510927Z,1772958317,BUY,SOL,DOWN,15,cross_tf_arb,FOK,0.5100,,2.00,1.02,,,,,0.78,SEED,0.990,,1522060,cf013951,,0,0,1.00

@@ -66,17 +66,28 @@ def strategy_keyboard():
     ])
 
 
-def coin_keyboard():
-    """Coin selection keyboard."""
+def coin_keyboard(enabled_coins: list = None):
+    """Coin selection keyboard with tick/untick toggle."""
+    if enabled_coins is None:
+        from config import Config
+        enabled_coins = Config.ENABLED_COINS
+
+    all_coins = [
+        ('BTC', '₿'),
+        ('ETH', 'Ξ'),
+        ('SOL', '◎'),
+        ('XRP', '✕'),
+    ]
+    buttons = []
+    for coin, icon in all_coins:
+        tick = '✅' if coin in enabled_coins else '❌'
+        buttons.append(InlineKeyboardButton(
+            f"{tick} {icon} {coin}", callback_data=f"coin_{coin}"
+        ))
+
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("₿ BTC", callback_data="coin_BTC"),
-            InlineKeyboardButton("Ξ ETH", callback_data="coin_ETH"),
-            InlineKeyboardButton("◎ SOL", callback_data="coin_SOL"),
-        ],
-        [
-            InlineKeyboardButton("🌐 All Coins", callback_data="coin_ALL"),
-        ],
+        buttons[:2],
+        buttons[2:],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")],
     ])
 
