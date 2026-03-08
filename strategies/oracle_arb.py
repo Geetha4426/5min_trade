@@ -129,6 +129,20 @@ class OracleArbStrategy(BaseStrategy):
         if entry_depth < 1.0:
             return None
 
+        # Reference price edge cross-validation
+        ref_engine = context.get('ref_engine')
+        if ref_engine:
+            ref_edge = ref_engine.calc_edge(
+                market, binance_feed, seconds_remaining,
+                market.get('up_price', 0.5), market.get('down_price', 0.5)
+            )
+            if ref_edge:
+                side_edge = ref_edge['up_edge'] if direction == 'UP' else ref_edge['down_edge']
+                if side_edge > 0.10:
+                    confidence = min(0.97, confidence + 0.05)
+                elif side_edge < -0.10:
+                    confidence -= 0.08
+
         # Build detailed rationale
         momentum = signals['momentum']
         divergence = signals['divergence']

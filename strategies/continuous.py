@@ -349,6 +349,22 @@ class MidPriceSniper(BaseStrategy):
             strength = abs(price_change_pct)
             confidence = min(0.80, 0.50 + strength * 5)
 
+            # Reference price model: much more rigorous underpricing check
+            edge_info = ''
+            ref_engine = context.get('ref_engine')
+            if ref_engine:
+                edge = ref_engine.calc_edge(
+                    market, binance_feed, seconds_remaining,
+                    market.get('up_price', 0.5), market.get('down_price', 0.5)
+                )
+                if edge:
+                    side_edge = edge['up_edge'] if favored_side == 'UP' else edge['down_edge']
+                    if side_edge > 0.10:
+                        confidence = min(0.90, confidence + 0.05)
+                        edge_info = f" Edge:{side_edge:.0%}"
+                    elif side_edge < -0.10:
+                        confidence -= 0.08
+
             return TradeSignal(
                 strategy=self.name,
                 coin=market['coin'],
@@ -361,7 +377,7 @@ class MidPriceSniper(BaseStrategy):
                 rationale=(
                     f"🎯 SNIPER: {coin} {favored_side} underpriced @ {ask_price:.3f}! "
                     f"Binance {coin} {price_change_pct:+.3f}% → "
-                    f"{favored_side} should be higher."
+                    f"{favored_side} should be higher.{edge_info}"
                 ),
                 metadata={
                     'price_change_pct': price_change_pct,

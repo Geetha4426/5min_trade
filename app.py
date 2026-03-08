@@ -417,6 +417,20 @@ class TradingEngine:
                     import data.binance_signals as _bsig
                     self.ref_engine.capture(market, self.binance_feed, _bsig)
 
+                    # Log reference price edge periodically (every 25 scans)
+                    if scan_count % 25 == 1:
+                        _ref_info = self.ref_engine.get_info(market.get('market_id', ''))
+                        if _ref_info:
+                            _prob = self.ref_engine.calc_p_up(market, self.binance_feed, seconds_remaining)
+                            if _prob:
+                                print(f"📍 {market.get('coin','?')} ref=${_ref_info['ref_price']:,.2f} "
+                                      f"({_ref_info['source']}) | "
+                                      f"now=${_prob['current_price']:,.2f} "
+                                      f"dist={_prob['distance_pct']:+.3f}% | "
+                                      f"P(UP)={_prob['p_up']:.1%} "
+                                      f"vol={_prob['vol_1m']:.4f} "
+                                      f"{seconds_remaining}s left", flush=True)
+
                     context = {
                         'clob': self.clob,
                         'poly_feed': self.poly_feed,

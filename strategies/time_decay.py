@@ -149,6 +149,23 @@ class TimeDecayStrategy(BaseStrategy):
         if seconds_remaining < 45:
             confidence += 0.03
 
+        # Reference price model: use P(UP) as better fair value
+        edge_info = ''
+        ref_engine = context.get('ref_engine')
+        if ref_engine:
+            edge = ref_engine.calc_edge(
+                market, binance_feed, seconds_remaining,
+                market.get('up_price', 0.5), market.get('down_price', 0.5)
+            )
+            if edge:
+                side_edge = edge['up_edge'] if market_direction == 'UP' else edge['down_edge']
+                if side_edge > 0.10:
+                    confidence = min(0.97, confidence + 0.05)
+                    edge_info = f" RefEdge:{side_edge:.0%}"
+                elif side_edge < -0.10:
+                    confidence -= 0.08
+                    edge_info = f" RefEdge:{side_edge:.0%}⚠️"
+
         confidence = min(0.95, confidence)
 
         return TradeSignal(
@@ -165,6 +182,7 @@ class TimeDecayStrategy(BaseStrategy):
                 f"({binance_change_pct:+.3f}%). "
                 f"Price: {winning_ask:.4f} vs fair: {fair_value:.4f}. "
                 f"Discount: {discount:.2f}. {seconds_remaining}s left."
+                f"{edge_info}"
             ),
             metadata={
                 'seconds_remaining': seconds_remaining,

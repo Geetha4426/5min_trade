@@ -42,8 +42,9 @@ class ReferencePriceEngine:
         """Capture the reference price for a market (call once per market).
 
         Priority:
-          1. Binance WS latest price (if market just opened, this IS the reference)
-          2. Binance REST kline_open at the market's epoch (fallback)
+          1. Binance REST kline_open at the market's epoch (most accurate, ~$4 avg error)
+          2. WS price history — snapshot closest to epoch (fallback)
+          3. Binance WS current price (only if market <30s old — last resort)
         """
         market_id = market.get('market_id', '')
         if not market_id or market_id in self._cache:
@@ -57,28 +58,27 @@ class ReferencePriceEngine:
         ref_price = None
         source = 'none'
 
-        # How old is this market? If freshly opened (<60s), WS price is ideal
         now_ts = int(time.time())
         market_age_secs = now_ts - epoch
 
-        # Method 1: Binance WS price (best for fresh markets)
-        if binance_feed and market_age_secs < 90:
-            ws_price = binance_feed.get_price(coin) if hasattr(binance_feed, 'get_price') else None
-            if ws_price and ws_price > 0:
-                ref_price = ws_price
-                source = 'binance_ws'
-
-        # Method 2: Binance kline_open at the epoch (best for older markets)
-        if not ref_price and binance_signals_mod:
+        # Method 1: Binance kline_open at the epoch (BEST — validated $4.30 avg error)
+        if binance_signals_mod:
             ref_price = self._kline_open_at_epoch(coin, epoch, binance_signals_mod)
             if ref_price:
                 source = 'kline_open'
 
-        # Method 3: WS price history — find snapshot closest to epoch
+        # Method 2: WS price history — find snapshot closest to epoch
         if not ref_price and binance_feed:
             ref_price = self._ws_history_at_epoch(coin, epoch, binance_feed)
             if ref_price:
                 source = 'ws_history'
+
+        # Method 3: Binance WS current price (only if very fresh — <30s)
+        if not ref_price and binance_feed and market_age_secs < 30:
+            ws_price = binance_feed.get_price(coin) if hasattr(binance_feed, 'get_price') else None
+            if ws_price and ws_price > 0:
+                ref_price = ws_price
+                source = 'binance_ws'
 
         if ref_price:
             self._cache[market_id] = {
@@ -88,6 +88,8 @@ class ReferencePriceEngine:
                 'source': source,
                 'captured_at': now_ts,
             }
+            print(f"📍 Ref price captured: {coin} ${ref_price:,.2f} "
+                  f"(source={source}, age={market_age_secs}s)", flush=True)
 
     def get_reference_price(self, market_id: str) -> Optional[float]:
         """Get the cached reference price for a market."""

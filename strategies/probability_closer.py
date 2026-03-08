@@ -155,6 +155,20 @@ class ProbabilityCloserStrategy(BaseStrategy):
         if seconds_remaining < 60:
             base_conf = min(0.95, base_conf + 0.05)
 
+        # Reference price model: verify the 80%+ side is truly likely
+        ref_engine = context.get('ref_engine')
+        if ref_engine:
+            edge = ref_engine.calc_edge(
+                market, binance_feed, seconds_remaining,
+                market.get('up_price', 0.5), market.get('down_price', 0.5)
+            )
+            if edge:
+                side_edge = edge['up_edge'] if best['direction'] == 'UP' else edge['down_edge']
+                if side_edge > 0.10:
+                    base_conf = min(0.97, base_conf + 0.05)
+                elif side_edge < -0.10:
+                    base_conf -= 0.08  # Model disagrees — this side may lose
+
         pct_return = best['net_profit'] / best['price'] * 100
 
         rationale = (
