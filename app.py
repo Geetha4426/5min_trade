@@ -43,6 +43,7 @@ from trading.risk_manager import RiskManager
 from trading.live_trader import LiveTrader
 from trading.live_balance_manager import LiveBalanceManager
 from trading.auto_redeem import AutoRedeemer
+from data.reference_price import ReferencePriceEngine
 from bot.main import TelegramBot
 
 
@@ -95,6 +96,9 @@ class TradingEngine:
 
         # Auto-redeem resolved positions (gasless via builder relayer)
         self.auto_redeemer = None  # Initialized in init() after live_trader
+
+        # Reference price engine — captures price-to-beat per market
+        self.ref_engine = ReferencePriceEngine()
 
         # State
         self.is_running = False
@@ -331,6 +335,11 @@ class TradingEngine:
         while self.is_running:
             try:
                 scan_count += 1
+
+                # Cleanup stale reference prices every 100 scans
+                if scan_count % 100 == 0:
+                    self.ref_engine.cleanup_expired()
+
                 markets = self.gamma.discover_markets(
                     timeframes=self.active_timeframes
                 )
@@ -404,12 +413,17 @@ class TradingEngine:
                     if seconds_remaining <= 0:
                         continue
 
+                    # Capture reference price (price-to-beat) for this market
+                    import data.binance_signals as _bsig
+                    self.ref_engine.capture(market, self.binance_feed, _bsig)
+
                     context = {
                         'clob': self.clob,
                         'poly_feed': self.poly_feed,
                         'binance_feed': self.binance_feed,
                         'seconds_remaining': seconds_remaining,
                         'balance_mgr': self.live_balance_mgr if self.trading_mode == 'live' else None,
+                        'ref_engine': self.ref_engine,
                     }
 
                     # Dynamic picker gets balance preferences

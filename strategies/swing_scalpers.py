@@ -447,6 +447,22 @@ class ExpiryRush(BaseStrategy):
             if seconds_remaining < 30:
                 confidence = min(0.95, confidence + 0.05)
 
+            # Reference price edge boost
+            edge_info = ''
+            ref_engine = context.get('ref_engine')
+            if ref_engine:
+                edge = ref_engine.calc_edge(
+                    market, binance_feed, seconds_remaining,
+                    market.get('up_price', 0.5), market.get('down_price', 0.5)
+                )
+                if edge:
+                    side_edge = edge['up_edge'] if side == 'UP' else edge['down_edge']
+                    if side_edge > 0.10:  # >10% edge — strong model agreement
+                        confidence = min(0.97, confidence + 0.05)
+                        edge_info = f" Edge:{side_edge:.0%}"
+                    elif side_edge < -0.10:  # Model disagrees — demote
+                        confidence -= 0.08
+
             if confidence > best_conf:
                 best_conf = confidence
                 best_signal = TradeSignal(
@@ -462,8 +478,8 @@ class ExpiryRush(BaseStrategy):
                         f"⏰🚀 EXPIRY RUSH: {market['coin']} {side} "
                         f"momentum +{momentum:.2f} in 15s! "
                         f"{seconds_remaining}s left. "
-                        f"Binance: {'✅ confirms' if binance_direction == side else '❌ no confirm'}. "
-                        f"Buy @ {ask:.3f}"
+                        f"Binance: {'✅ confirms' if binance_direction == side else '❌ no confirm'}."
+                        f"{edge_info} Buy @ {ask:.3f}"
                     ),
                     metadata={
                         'momentum': momentum,
@@ -567,6 +583,20 @@ class BinanceMomentumSniper(BaseStrategy):
         # Confidence: stronger BTC move + cheaper Poly price = higher
         move_strength = abs(btc_change_pct)
         confidence = min(0.92, 0.55 + move_strength * 3 + (0.50 - ask) * 0.5)
+
+        # Reference price edge boost
+        ref_engine = context.get('ref_engine')
+        if ref_engine:
+            edge = ref_engine.calc_edge(
+                market, binance_feed, seconds_remaining,
+                market.get('up_price', 0.5), market.get('down_price', 0.5)
+            )
+            if edge:
+                side_edge = edge['up_edge'] if poly_side == 'UP' else edge['down_edge']
+                if side_edge > 0.10:
+                    confidence = min(0.95, confidence + 0.05)
+                elif side_edge < -0.10:
+                    confidence -= 0.08
 
         # Extra boost for very strong moves
         if move_strength > 0.30:
@@ -680,6 +710,20 @@ class OrderbookImbalance(BaseStrategy):
             # Cheaper price = more upside = higher confidence
             if ask < 0.30:
                 confidence = min(0.93, confidence + 0.03)
+
+            # Reference price edge boost
+            ref_engine = context.get('ref_engine')
+            if ref_engine:
+                edge = ref_engine.calc_edge(
+                    market, binance_feed, seconds_remaining,
+                    market.get('up_price', 0.5), market.get('down_price', 0.5)
+                )
+                if edge:
+                    side_edge = edge['up_edge'] if side == 'UP' else edge['down_edge']
+                    if side_edge > 0.10:
+                        confidence = min(0.95, confidence + 0.05)
+                    elif side_edge < -0.10:
+                        confidence -= 0.08
 
             if confidence > best_conf:
                 best_conf = confidence

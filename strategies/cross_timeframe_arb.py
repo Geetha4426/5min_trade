@@ -477,7 +477,8 @@ class CrossTimeframeArbStrategy(BaseStrategy):
         if len(klines) < 3:
             return None
 
-        # Find the close price at each market's start epoch
+        # Find the OPEN price at each market's start epoch
+        # (kline_open is ~$4 avg error vs Chainlink; kline_close is ~$35 error)
         epoch_longer_ms = epoch_longer * 1000
         epoch_shorter_ms = epoch_shorter * 1000
 
@@ -489,9 +490,9 @@ class CrossTimeframeArbStrategy(BaseStrategy):
             ct = k['close_time']
             # Kline covers [open_time, close_time] — match epoch within candle
             if ot <= epoch_longer_ms <= ct:
-                price_at_longer = k['close']
+                price_at_longer = k['open']
             if ot <= epoch_shorter_ms <= ct:
-                price_at_shorter = k['close']
+                price_at_shorter = k['open']
 
         # Fallback: use BinanceFeed price_history snapshots
         if (not price_at_longer or not price_at_shorter) and binance_feed:
