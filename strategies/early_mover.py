@@ -33,6 +33,7 @@ import time
 from typing import Dict, List, Optional
 from config import Config
 from strategies.base_strategy import BaseStrategy, TradeSignal
+from data.quant_formulas import adverse_selection_prob, microprice_signal
 
 
 class EarlyMoverStrategy(BaseStrategy):
@@ -165,6 +166,22 @@ class EarlyMoverStrategy(BaseStrategy):
         spread = dominant_ask - cheap_ask
         if spread < 0.30:
             return None  # Not enough asymmetry
+
+        # ── Quant guard: adverse selection ──
+        cheap_bid = cheap_book.get('best_bid', 0)
+        cheap_spread = cheap_ask - cheap_bid if cheap_bid > 0 else 0.10
+        if adverse_selection_prob(cheap_spread) > 0.35:
+            return None  # Informed traders dominating cheap side
+
+        # ── Quant guard: MicroPrice must not oppose our direction ──
+        cheap_bid_d = cheap_book.get('bid_depth', 0)
+        cheap_ask_d = cheap_book.get('ask_depth', 0)
+        if cheap_bid_d > 0 or cheap_ask_d > 0:
+            mp = microprice_signal(
+                cheap_bid or cheap_ask - 0.01, cheap_ask, cheap_bid_d, cheap_ask_d)
+            # For cheap side: MicroPrice should be bullish (buyers accumulating)
+            if mp['direction'] == 'DOWN' and mp['strength'] > 0.5:
+                return None  # MicroPrice says sellers dominating — don't fight it
 
         # ── STEP 6: Calculate confidence ──
         # Base: 0.72 (reversal confirmed by Binance + cheap entry)

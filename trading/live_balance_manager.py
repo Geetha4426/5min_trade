@@ -526,7 +526,8 @@ class LiveBalanceManager:
         disabled = []
         if self.mode_name in ('seed', 'plant'):
             # SEED/PLANT = capital preservation. Block strategies with bad risk/reward.
-            disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer', 'oracle_arb']
+            disabled = ['cheap_hunter', 'penny_sniper', 'prob_closer', 'oracle_arb',
+                        'quant_edge', 'microprice_sniper', 'informed_flow']
         elif self.mode_name == 'concentration':
             # CONCENTRATION ($5-20): prob_closer buys at $0.90-0.95 for 5-10%
             # edge.  One loss wipes $1+ on a $10 account — terrible R:R.

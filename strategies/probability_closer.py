@@ -23,6 +23,7 @@ Uses Binance price confirmation for extra safety.
 
 from typing import Dict, List, Optional
 from strategies.base_strategy import BaseStrategy, TradeSignal
+from data.quant_formulas import adverse_selection_prob, microprice_signal
 
 
 class ProbabilityCloserStrategy(BaseStrategy):
@@ -89,6 +90,23 @@ class ProbabilityCloserStrategy(BaseStrategy):
 
         up_ask = up_book['best_ask']
         down_ask = down_book['best_ask']
+        up_bid = up_book.get('best_bid', 0)
+        down_bid = down_book.get('best_bid', 0)
+
+        # Quant guard: adverse selection filter
+        # Skip if informed traders dominate (spread implies >30% informed)
+        up_spread = up_ask - up_bid if up_bid > 0 else 0.10
+        down_spread = down_ask - down_bid if down_bid > 0 else 0.10
+        avg_spread = (up_spread + down_spread) / 2
+        if adverse_selection_prob(avg_spread) > 0.30:
+            return None
+
+        # Quant guard: MicroPrice confirmation
+        # For the winning side, MicroPrice should confirm buyer dominance
+        up_bid_d = up_book.get('bid_depth', 0)
+        up_ask_d = up_book.get('ask_depth', 0)
+        down_bid_d = down_book.get('bid_depth', 0)
+        down_ask_d = down_book.get('ask_depth', 0)
 
         # Find the higher-probability side
         candidates = []
@@ -150,6 +168,16 @@ class ProbabilityCloserStrategy(BaseStrategy):
         base_conf = min(0.90, 0.60 + best['price'] * 0.3)
         if binance_confirms:
             base_conf = min(0.95, base_conf + 0.10)
+
+        # Quant boost: MicroPrice confirms the winning side
+        if best['direction'] == 'UP':
+            mp = microprice_signal(up_bid or up_ask - 0.01, up_ask, up_bid_d, up_ask_d)
+            if mp['direction'] == 'UP' and mp['strength'] > 0.3:
+                base_conf = min(0.97, base_conf + 0.03)
+        else:
+            mp = microprice_signal(down_bid or down_ask - 0.01, down_ask, down_bid_d, down_ask_d)
+            if mp['direction'] == 'UP' and mp['strength'] > 0.3:
+                base_conf = min(0.97, base_conf + 0.03)
 
         # More confident closer to expiry
         if seconds_remaining < 60:

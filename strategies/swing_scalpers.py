@@ -17,6 +17,7 @@ import time
 import math
 from typing import Dict, List, Optional
 from strategies.base_strategy import BaseStrategy, TradeSignal
+from data.quant_formulas import effective_spread, adverse_selection_prob
 
 
 class MeanReversionScalper(BaseStrategy):
@@ -434,6 +435,13 @@ class ExpiryRush(BaseStrategy):
             if ask > self.MAX_ENTRY:
                 continue
 
+            # Quant guard: adverse selection on this side's spread
+            bid = book.get('best_bid', 0)
+            if bid > 0:
+                side_spread = ask - bid
+                if adverse_selection_prob(side_spread) > 0.35:
+                    continue  # Too much informed activity
+
             # Confidence: base + momentum strength + Binance confirmation
             confidence = min(0.92, 0.50 + momentum * 2)
             
@@ -579,6 +587,16 @@ class BinanceMomentumSniper(BaseStrategy):
 
         if book['ask_depth'] < 0.50:
             return None
+
+        # Quant guard: effective spread check
+        bid = book.get('best_bid', 0)
+        if bid > 0:
+            mid = (bid + ask) / 2
+            es = effective_spread(ask, mid)
+            # Edge from Binance move should exceed spread cost
+            coarse_edge = max(0, abs(btc_change_pct) / 100 * ask)
+            if es > 0 and coarse_edge < es * 0.5:
+                return None  # Spread eats our edge
 
         # Confidence: stronger BTC move + cheaper Poly price = higher
         move_strength = abs(btc_change_pct)

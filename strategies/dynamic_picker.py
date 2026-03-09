@@ -43,6 +43,9 @@ from strategies.swing_scalpers import (
     OrderbookImbalance
 )
 from strategies.early_mover import EarlyMoverStrategy
+from strategies.quant_strategies import (
+    QuantEdgeStrategy, MicroPriceSniperStrategy, InformedFlowDetector
+)
 
 
 class StrategyTracker:
@@ -182,7 +185,7 @@ class DynamicPicker(BaseStrategy):
     """
 
     name = "dynamic"
-    description = "All 15 strategies — trades continuously, adapts to balance + track record"
+    description = "All 21 strategies — trades continuously, adapts to balance + track record"
 
     def __init__(self):
         self.strategies: List[BaseStrategy] = [
@@ -204,6 +207,9 @@ class DynamicPicker(BaseStrategy):
             SpreadScalper(),              # Bid-ask profit
             TimeDecayStrategy(),          # Near-expiry
             OrderbookImbalance(),         # Depth-ratio directional signal (NEW)
+            QuantEdgeStrategy(),          # Multi-factor quant screening (NEW v2)
+            MicroPriceSniperStrategy(),   # MicroPrice divergence plays (NEW v2)
+            InformedFlowDetector(),       # Kyle's Lambda whale detection (NEW v2)
         ]
         # Strategy win rate tracker (learns from results)
         self.tracker = StrategyTracker()
@@ -274,6 +280,12 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.90, s.confidence + 0.05)
             elif sig_type == 'book_imbalance':
                 s.confidence = min(0.93, s.confidence + 0.08)  # Orderbook signal
+            elif sig_type == 'quant_edge':
+                s.confidence = min(0.95, s.confidence + 0.12)  # Full quant screening
+            elif sig_type == 'microprice_sniper':
+                s.confidence = min(0.93, s.confidence + 0.10)  # Hidden volume pressure
+            elif sig_type == 'informed_flow':
+                s.confidence = min(0.93, s.confidence + 0.10)  # Whale piggyback
 
             # ── Apply strategy win rate adjustment (learning) ──
             track_adj = self.tracker.get_adjustment(s.strategy)

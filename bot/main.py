@@ -77,6 +77,7 @@ class TelegramBot:
         self.app.add_handler(CallbackQueryHandler(self.cb_mode, pattern=r"^mode_"))
         self.app.add_handler(CallbackQueryHandler(self.cb_risk, pattern=r"^risk_"))
         self.app.add_handler(CallbackQueryHandler(self.cb_settings, pattern=r"^set_"))
+        self.app.add_handler(CallbackQueryHandler(self.cb_paper_balance, pattern=r"^pbal_"))
 
         # Set bot commands menu (may fail before initialize — that's ok)
         try:
@@ -1199,17 +1200,62 @@ class TelegramBot:
                 reply_markup=settings_keyboard(mgr.auto_migrate)
             )
         elif action == 'set_paper_balance':
+            if self.engine:
+                current = self.engine.paper_trader.risk.balance
+            else:
+                current = Config.STARTING_BALANCE
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = [
+                [InlineKeyboardButton(f"${amt}", callback_data=f"pbal_{amt}") for amt in [10, 25, 50]],
+                [InlineKeyboardButton(f"${amt}", callback_data=f"pbal_{amt}") for amt in [100, 250, 500]],
+                [InlineKeyboardButton(f"${amt}", callback_data=f"pbal_{amt}") for amt in [1000, 5000, 10000]],
+                [InlineKeyboardButton("🔙 Back", callback_data="back_main")],
+            ]
             await query.edit_message_text(
                 f"💵 **Paper Starting Balance**\n\n"
-                f"Current: ${Config.STARTING_BALANCE:.2f}\n\n"
-                f"Change via:\n"
-                f"  Railway env: `STARTING_BALANCE=50`\n"
-                f"  Or restart with different value.\n\n"
-                f"This only affects paper mode.",
-                parse_mode='Markdown'
+                f"Current: ${current:.2f}\n\n"
+                f"Select a new starting balance:\n"
+                f"(Resets paper P&L tracking)",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
         else:
             await query.edit_message_text("⚠️ Unknown setting")
+
+    async def cb_paper_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle paper balance amount selection."""
+        query = update.callback_query
+        await query.answer()
+
+        if not self.engine:
+            await query.edit_message_text("⚠️ Engine not initialized")
+            return
+
+        data = query.data  # e.g. "pbal_100"
+        try:
+            amount = float(data.split('_', 1)[1])
+        except (ValueError, IndexError):
+            await query.edit_message_text("⚠️ Invalid amount")
+            return
+
+        if amount < 1 or amount > 100000:
+            await query.edit_message_text("⚠️ Amount must be $1-$100,000")
+            return
+
+        # Update paper balance
+        old_balance = self.engine.paper_trader.risk.balance
+        self.engine.paper_trader.risk.balance = amount
+        from trading.balance_manager import DynamicBalanceManager
+        self.engine.paper_trader.risk.bm = DynamicBalanceManager(amount)
+        Config.STARTING_BALANCE = amount
+
+        await query.edit_message_text(
+            f"✅ **Paper Balance Updated**\n\n"
+            f"Old: ${old_balance:.2f}\n"
+            f"New: ${amount:.2f}\n\n"
+            f"Paper P&L tracking reset.",
+            parse_mode='Markdown',
+        )
 
     # ═══════════════════════════════════════════════════════════════════
     # NOTIFICATIONS

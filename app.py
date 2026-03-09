@@ -422,6 +422,16 @@ class TradingEngine:
                 if self.flip_mode:
                     strategy = self._flip_strategy
 
+                # ── Pre-warm Binance kline cache (non-blocking) ──
+                # Fetches all coins in parallel threads so strategy calls hit cache
+                active_coins = list({m.get('coin', '').upper() for m in markets if m.get('coin')})
+                if active_coins:
+                    import data.binance_signals as _bsig_warm
+                    try:
+                        await _bsig_warm.warm_cache(active_coins, '1m', 25)
+                    except Exception:
+                        pass  # Cache miss is fine, strategies will fetch synchronously
+
                 # Feed fallback prices into ClobClient from gamma + WS
                 for market in markets:
                     up_tid = market.get('up_token_id', '')

@@ -14,8 +14,9 @@ but Polymarket hasn't caught up yet — a guaranteed edge window.
 
 import time
 import math
+import asyncio
 import requests
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List as TList
 from config import Config
 
 
@@ -36,7 +37,7 @@ BINANCE_PAIRS = {
 
 # Cache to avoid hitting Binance rate limits
 _cache: Dict[str, Dict] = {}
-_CACHE_TTL = 3  # seconds
+_CACHE_TTL = 5  # seconds — warm_cache prevents blocking, keep data fresh
 
 
 def _get_klines(symbol: str, interval: str = '1m', limit: int = 15) -> list:
@@ -54,7 +55,7 @@ def _get_klines(symbol: str, interval: str = '1m', limit: int = 15) -> list:
         return []
 
     try:
-        url = f"https://api.binance.com/api/v3/klines"
+        url = "https://api.binance.com/api/v3/klines"
         resp = requests.get(url, params={
             'symbol': pair,
             'interval': interval,
@@ -65,6 +66,54 @@ def _get_klines(symbol: str, interval: str = '1m', limit: int = 15) -> list:
         return data
     except Exception:
         return []
+
+
+def _fetch_klines_sync(pair: str, interval: str, limit: int) -> list:
+    """Blocking HTTP fetch — called via asyncio.to_thread()."""
+    try:
+        url = "https://api.binance.com/api/v3/klines"
+        resp = requests.get(url, params={
+            'symbol': pair, 'interval': interval, 'limit': limit,
+        }, timeout=5)
+        return resp.json()
+    except Exception:
+        return []
+
+
+async def warm_cache(coins: TList[str], interval: str = '1m', limit: int = 25):
+    """
+    Pre-fetch klines for all active coins in parallel threads.
+
+    Call this ONCE at the start of each scan cycle so that all subsequent
+    _get_klines() calls hit the warm cache and never block the event loop.
+    """
+    now = time.time()
+    tasks = []
+    keys = []
+
+    for coin in coins:
+        cache_key = f"{coin}_{interval}_{limit}"
+        # Skip if cache is still fresh
+        if cache_key in _cache and now - _cache[cache_key]['ts'] < _CACHE_TTL:
+            continue
+        pair = BINANCE_PAIRS.get(coin.upper())
+        if not pair:
+            continue
+        keys.append((coin, cache_key))
+        tasks.append(asyncio.to_thread(_fetch_klines_sync, pair, interval, limit))
+
+    if not tasks:
+        return
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    now = time.time()
+    for (coin, cache_key), result in zip(keys, results):
+        if isinstance(result, list) and result:
+            _cache[cache_key] = {'data': result, 'ts': now}
+            # Also warm the 15-candle cache since most strategies use that
+            cache_key_15 = f"{coin}_{interval}_15"
+            if limit >= 15:
+                _cache[cache_key_15] = {'data': result[-15:], 'ts': now}
 
 
 def _parse_klines(raw: list) -> list:
