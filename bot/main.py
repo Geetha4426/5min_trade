@@ -66,6 +66,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("redeem", self.cmd_redeem))
         self.app.add_handler(CommandHandler("logs", self.cmd_logs))
         self.app.add_handler(CommandHandler("automigrate", self.cmd_automigrate))
+        self.app.add_handler(CommandHandler("flip", self.cmd_flip))
 
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.cb_timeframe, pattern=r"^tf_"))
@@ -75,6 +76,7 @@ class TelegramBot:
         self.app.add_handler(CallbackQueryHandler(self.cb_back, pattern=r"^back_"))
         self.app.add_handler(CallbackQueryHandler(self.cb_mode, pattern=r"^mode_"))
         self.app.add_handler(CallbackQueryHandler(self.cb_risk, pattern=r"^risk_"))
+        self.app.add_handler(CallbackQueryHandler(self.cb_settings, pattern=r"^set_"))
 
         # Set bot commands menu (may fail before initialize — that's ok)
         try:
@@ -92,6 +94,7 @@ class TelegramBot:
                 BotCommand("estop", "Emergency stop"),
                 BotCommand("seed", "$1 start — arb-only seed mode"),
                 BotCommand("cheaphunter", "🎰 Lottery ticket mode — $1 bets across all TFs"),
+                BotCommand("flip", "🔄 Flip mode — $1 doubling (1→2→4→8→16...)"),
                 BotCommand("redeem", "Claim resolved positions on-chain"),
                 BotCommand("logs", "Download trade log CSV"),
                 BotCommand("history", "Trade history"),
@@ -429,9 +432,12 @@ class TelegramBot:
 
     async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show settings."""
+        auto_mig = True
+        if self.engine:
+            auto_mig = self.engine.live_balance_mgr.auto_migrate
         await update.message.reply_text(
             "⚙️ Settings:",
-            reply_markup=settings_keyboard()
+            reply_markup=settings_keyboard(auto_mig)
         )
 
     # ═══════════════════════════════════════════════════════════════════
@@ -884,6 +890,86 @@ class TelegramBot:
 
         await update.message.reply_text(msg)
 
+    async def cmd_flip(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle Flip Mode — $1 doubling (martingale) with near-certainty signals.
+        
+        When ON: bets entire balance on extreme-confidence signals only.
+        Win → double. Lose → reset to $1.
+        $1→$2→$4→$8→$16→$32→$64→$128+
+        
+        Usage: /flip — toggles on/off
+        """
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not initialized")
+            return
+
+        if not self.engine.live_trader.is_ready:
+            await update.message.reply_text(
+                "❌ Live trading not configured!\n"
+                "Set POLY_PRIVATE_KEY first, then /flip"
+            )
+            return
+
+        if self.engine.flip_mode:
+            # TURN OFF
+            self.engine.flip_mode = False
+            self.engine.live_balance_mgr.flip_mode = False
+            if self.engine._flip_prev_timeframes:
+                self.engine.active_timeframes = self.engine._flip_prev_timeframes
+                self.engine._flip_prev_timeframes = None
+
+            msg = (
+                "🔄 FLIP MODE: OFF\n\n"
+                "Restored normal trading.\n"
+                f"Timeframes: {self.engine.active_timeframes}\n"
+                f"Mode: {self.engine.live_balance_mgr.mode.emoji} "
+                f"{self.engine.live_balance_mgr.mode.name}"
+            )
+        else:
+            # TURN ON
+            self.engine._flip_prev_timeframes = list(self.engine.active_timeframes)
+            self.engine.active_timeframes = [5]  # 5min only — fastest resolution
+            self.engine.flip_mode = True
+            self.engine.live_balance_mgr.flip_mode = True
+            self.engine._flip_streak = 0
+
+            # Disable other special modes
+            if self.engine.cheap_hunter_mode:
+                self.engine.cheap_hunter_mode = False
+                self.engine.live_balance_mgr.cheap_hunter_mode = False
+
+            # Auto-switch to live mode
+            if self.engine.trading_mode != 'live':
+                self.engine.trading_mode = 'live'
+
+            # Start trading if not already
+            if not self.engine.is_running:
+                await self.engine.start()
+
+            bal = self.engine.live_balance_mgr.balance
+            self.engine._flip_start_balance = bal
+
+            msg = (
+                f"🔄 FLIP MODE: ON\n\n"
+                f"💰 Starting balance: ${bal:.2f}\n"
+                f"🔴 Trading: LIVE MODE\n"
+                f"⏱️ Timeframe: 5min only\n\n"
+                f"📐 THE DOUBLING CHAIN:\n"
+                f"  $1 → $2 → $4 → $8 → $16 → $32 → $64 → $128\n\n"
+                f"🛡️ SAFETY (ALL must pass to trade):\n"
+                f"  ✅ Reference price model >92% probability\n"
+                f"  ✅ Binance confirms direction >0.10%\n"
+                f"  ✅ Orderbook confirms same direction\n"
+                f"  ✅ MicroPrice (volume-weighted) confirms\n"
+                f"  ✅ Last 2.5min of market only\n"
+                f"  ✅ Combined ask ≤$1.02 (spread check)\n\n"
+                f"📊 Expected: trades ~2-5x per hour\n"
+                f"   Win rate target: >90%\n\n"
+                f"Use /flip to turn OFF"
+            )
+
+        await update.message.reply_text(msg)
+
     # ═══════════════════════════════════════════════════════════════════
     # CALLBACKS
     # ═══════════════════════════════════════════════════════════════════
@@ -1041,6 +1127,89 @@ class TelegramBot:
             await query.edit_message_text(msg)
         else:
             await query.edit_message_text("⚠️ Engine not initialized")
+
+    async def cb_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle settings sub-menu buttons (set_coins, set_timeframes, etc)."""
+        query = update.callback_query
+        await query.answer()
+        action = query.data  # e.g. "set_coins", "set_timeframes"
+
+        if action == 'set_coins':
+            await query.edit_message_text(
+                f"🪙 **Coins:** {', '.join(Config.ENABLED_COINS)}\n\nTap to toggle:",
+                parse_mode='Markdown',
+                reply_markup=coin_keyboard(Config.ENABLED_COINS)
+            )
+        elif action == 'set_timeframes':
+            await query.edit_message_text(
+                f"⏱️ **Timeframes:** {', '.join(f'{t}min' for t in self.engine.active_timeframes)}\n\nSelect:",
+                parse_mode='Markdown',
+                reply_markup=timeframe_keyboard()
+            )
+        elif action == 'set_risk':
+            if not self.engine:
+                await query.edit_message_text("⚠️ Engine not initialized")
+                return
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            from trading.live_balance_manager import LIVE_MODES
+            current = self.engine.live_balance_mgr.mode_name
+            buttons = []
+            for key, mode in LIVE_MODES.items():
+                check = '✅ ' if key == current else ''
+                buttons.append([InlineKeyboardButton(
+                    f"{check}{mode.emoji} {mode.name} — {mode.description}",
+                    callback_data=f"risk_{key}"
+                )])
+            await query.edit_message_text(
+                f"🎯 **Risk Mode:** {self.engine.live_balance_mgr.mode.emoji} "
+                f"{self.engine.live_balance_mgr.mode.name}\n\nSelect:",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        elif action == 'set_position_size':
+            if not self.engine:
+                await query.edit_message_text("⚠️ Engine not initialized")
+                return
+            mgr = self.engine.live_balance_mgr
+            size = mgr.get_position_size(mgr.mode.min_confidence)
+            await query.edit_message_text(
+                f"📏 **Position Sizing**\n\n"
+                f"Mode: {mgr.mode.emoji} {mgr.mode.name}\n"
+                f"Balance: ${mgr.balance:.2f}\n"
+                f"Reserve: ${mgr.reserve:.2f}\n"
+                f"Tradeable: ${mgr.tradeable_balance:.2f}\n"
+                f"Max bet: {mgr.mode.max_bet_pct:.0f}% of tradeable\n"
+                f"Est. next bet: ${size:.2f}\n"
+                f"Size multiplier: {mgr._size_multiplier:.2f}×\n\n"
+                f"Sizing is automatic (Kelly criterion).\n"
+                f"Change risk mode with /risk to adjust.",
+                parse_mode='Markdown'
+            )
+        elif action == 'set_automigrate':
+            if not self.engine:
+                await query.edit_message_text("⚠️ Engine not initialized")
+                return
+            mgr = self.engine.live_balance_mgr
+            mgr.auto_migrate = not mgr.auto_migrate
+            status = "ON ✅" if mgr.auto_migrate else "OFF 🔒"
+            await query.edit_message_text(
+                f"🔄 Auto-Migrate: {status}\n\n"
+                f"Mode: {mgr.mode.emoji} {mgr.mode.name}\n"
+                f"{'Mode will auto-change with balance.' if mgr.auto_migrate else 'Mode locked to your choice.'}",
+                reply_markup=settings_keyboard(mgr.auto_migrate)
+            )
+        elif action == 'set_paper_balance':
+            await query.edit_message_text(
+                f"💵 **Paper Starting Balance**\n\n"
+                f"Current: ${Config.STARTING_BALANCE:.2f}\n\n"
+                f"Change via:\n"
+                f"  Railway env: `STARTING_BALANCE=50`\n"
+                f"  Or restart with different value.\n\n"
+                f"This only affects paper mode.",
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("⚠️ Unknown setting")
 
     # ═══════════════════════════════════════════════════════════════════
     # NOTIFICATIONS

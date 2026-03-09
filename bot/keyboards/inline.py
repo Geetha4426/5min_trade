@@ -102,12 +102,15 @@ def confirm_keyboard(action: str):
     ])
 
 
-def settings_keyboard():
-    """Settings keyboard."""
+def settings_keyboard(auto_migrate: bool = True):
+    """Settings keyboard with all functional buttons."""
+    migrate_label = "🔄 Auto-Migrate: ON ✅" if auto_migrate else "🔄 Auto-Migrate: OFF 🔒"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📏 Position Size", callback_data="set_position_size")],
         [InlineKeyboardButton("🛡️ Risk Limits", callback_data="set_risk")],
         [InlineKeyboardButton("⏱️ Timeframes", callback_data="set_timeframes")],
         [InlineKeyboardButton("🪙 Coins", callback_data="set_coins")],
+        [InlineKeyboardButton(migrate_label, callback_data="set_automigrate")],
+        [InlineKeyboardButton("💵 Paper Balance", callback_data="set_paper_balance")],
         [InlineKeyboardButton("🔙 Back", callback_data="back_main")],
     ])

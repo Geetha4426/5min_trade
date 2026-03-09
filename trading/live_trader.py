@@ -1938,23 +1938,44 @@ class LiveTrader:
             self._last_stop_loss_time = time.time()
 
         # ── sell_failed_settle / market_settled: tokens unredeemed ──
-        # Don't fake PnL — we don't know the outcome until auto-redeem runs.
-        # Balance sync will pick up USDC once tokens are redeemed on-chain.
+        # Estimate PnL based on likely settlement direction.
+        # If price confirms our direction, shares settle at $1.
+        # If price is against us, shares settle at $0.
+        # Balance sync will later pick up real USDC from auto-redeem.
         if reason in ('sell_failed_settle', 'market_settled'):
+            entry = pos.get('entry_price', 0)
+            shares = pos.get('shares', 0)
+            cost = pos.get('size_usd', entry * shares)
+
+            # Estimate settlement: if exit_price > 0.50, likely wins ($1/share)
+            # If exit_price < 0.50, likely loses ($0/share)
+            if exit_price >= 0.50:
+                estimated_payout = shares * 1.0
+                estimated_pnl = estimated_payout - cost
+            else:
+                estimated_pnl = -cost
+
             pos['exit_price'] = exit_price
             pos['pnl_gross'] = pnl
-            pos['pnl'] = 0        # Can't realize PnL without actually selling
+            pos['pnl'] = round(estimated_pnl, 4)
             pos['fees'] = 0
-            pos['pnl_pct'] = 0
+            pos['pnl_pct'] = (estimated_pnl / cost * 100) if cost > 0 else 0
             pos['exit_time'] = datetime.now().isoformat()
             pos['exit_reason'] = reason
             pos['status'] = 'settled_unredeemed'
             self.trade_history.append(pos)
+
+            # Track win/loss for consecutive sizing
+            won = estimated_pnl > 0
+            self.balance_mgr.record_result(won)
+
             # DON'T update balance — USDC is still locked in outcome tokens
             label = "expired" if reason == 'market_settled' else "unsold"
+            pnl_emoji = '✅' if won else '❌'
             print(f"⏰ SETTLED ({label}): {pos['coin']} {pos['direction']} — "
-                  f"Entry:${pos['entry_price']:.3f} → Mkt:${exit_price:.3f} | "
-                  f"~{pos.get('shares',0):.1f} tokens awaiting redemption | "
+                  f"Entry:${entry:.3f} → Mkt:${exit_price:.3f} | "
+                  f"~{shares:.1f} tokens | "
+                  f"{pnl_emoji} Est PnL: ${estimated_pnl:+.2f} | "
                   f"Bal stays ${self.balance_mgr.balance:.2f}",
                   flush=True)
 

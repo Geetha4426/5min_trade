@@ -153,6 +153,10 @@ class LiveBalanceManager:
         # When True, relaxes position limits (up to 10) and forces $1 bets
         self.cheap_hunter_mode = False
 
+        # ── Flip mode override ──
+        # When True: bet FULL balance, 1 position max, no reserve
+        self.flip_mode = False
+
         # ── Session loss circuit breaker (SEED mode) ──
         # Pauses trading for 5 min if >40% session loss. Only in SEED: tiny
         # capital can evaporate in seconds without a breaker.
@@ -244,6 +248,8 @@ class LiveBalanceManager:
     @property
     def reserve(self) -> float:
         """Amount to keep untouched."""
+        if self.flip_mode:
+            return 0  # Flip mode: no reserve, bet everything
         return max(self.mode.reserve_min, self.balance * self.mode.reserve_pct / 100)
 
     @property
@@ -262,6 +268,8 @@ class LiveBalanceManager:
             # Allow many small lottery bets — the whole point is volume
             by_balance = int(self.tradeable_balance / Config.POLYMARKET_MIN_ORDER_SIZE)
             return max(1, min(by_balance, 10))
+        if self.flip_mode:
+            return 1  # Flip mode: one trade at a time, all-in
         # Dynamic: scale with balance, respect $1 min per position
         by_balance = int(self.tradeable_balance * self.mode.max_pos_per_dollar)
         by_min_size = int(self.tradeable_balance / Config.POLYMARKET_MIN_ORDER_SIZE)
@@ -269,6 +277,14 @@ class LiveBalanceManager:
 
     def can_trade(self, is_arb: bool = False) -> tuple:
         """Check if we can open a new position. Drawdown is alert-only, never blocks."""
+        # ── Flip mode: skip session breaker, just check balance + positions ──
+        if self.flip_mode:
+            if self.balance < Config.POLYMARKET_MIN_ORDER_SIZE:
+                return False, "💀 Balance below minimum order size"
+            if self.open_positions >= 1:
+                return False, "🔄 Flip mode: 1 position at a time"
+            return True, "🔄 FLIP"
+
         # ── Session loss circuit breaker (SEED/PLANT only) ──
         if self.mode_name in ('seed', 'plant'):
             if self._session_start_balance is None:
@@ -364,6 +380,11 @@ class LiveBalanceManager:
         Always returns at least $1 (Polymarket minimum) or 0 if can't trade.
         """
         min_size = Config.POLYMARKET_MIN_ORDER_SIZE
+
+        # Flip mode: bet FULL balance (no reserve, no Kelly — all-in)
+        if self.flip_mode:
+            full = self.balance
+            return round(full, 2) if full >= min_size else 0
 
         # Cheap hunter: fixed $1 bets — never risk more per lottery ticket
         if self.cheap_hunter_mode:

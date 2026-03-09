@@ -44,6 +44,7 @@ from trading.live_trader import LiveTrader
 from trading.live_balance_manager import LiveBalanceManager
 from trading.auto_redeem import AutoRedeemer
 from data.reference_price import ReferencePriceEngine
+from strategies.flip_mode import FlipModeStrategy
 from bot.main import TelegramBot
 
 
@@ -111,6 +112,16 @@ class TradingEngine:
         # but 1 win at $1→$100 = +$90 net. Toggled via /cheaphunter command.
         self.cheap_hunter_mode = False
         self._cheap_hunter_prev_timeframes = None  # Restore when mode exits
+
+        # ── Flip Mode ──
+        # Martingale doubling: $1→$2→$4→$8→$16→$32→$64→$128
+        # Only fires on extreme near-certainty conditions.
+        # Uses FlipModeStrategy as exclusive signal source.
+        self.flip_mode = False
+        self._flip_strategy = FlipModeStrategy()
+        self._flip_prev_timeframes = None
+        self._flip_streak = 0          # Current win streak (doubles)
+        self._flip_start_balance = 0   # Balance when flip chain started
 
     @property
     def active_trader(self):
@@ -362,9 +373,27 @@ class TradingEngine:
                         'min_confidence': 0.40,  # Low bar — these are lottery tickets
                     }
 
+                # ── Flip Mode overrides ──
+                if self.flip_mode:
+                    balance_prefs = {
+                        'enabled': ['flip_mode'],
+                        'disabled': [],
+                        'min_confidence': 0.92,
+                    }
+
                 # Log status periodically
                 if scan_count % 50 == 1:
-                    if self.cheap_hunter_mode:
+                    if self.flip_mode:
+                        bal = self.live_balance_mgr.balance
+                        pos = self.live_balance_mgr.open_positions
+                        step = self._flip_streak
+                        target = 2 ** step if step < 10 else f"2^{step}"
+                        print(f"🔄 [FLIP MODE] "
+                              f"Balance: ${bal:.2f} | "
+                              f"Step: {step} (next bet: ${target}) | "
+                              f"Positions: {pos}/1 | "
+                              f"Markets: {len(markets)}")
+                    elif self.cheap_hunter_mode:
                         bal = self.live_balance_mgr.balance
                         pos = self.live_balance_mgr.open_positions
                         print(f"🎰 [CHEAP HUNTER] "
@@ -388,6 +417,10 @@ class TradingEngine:
 
                 # Run strategy on EVERY market
                 strategy = self.strategies.get(self.active_strategy, self.dynamic_picker)
+
+                # Flip mode: use exclusive flip strategy, 1 position max
+                if self.flip_mode:
+                    strategy = self._flip_strategy
 
                 # Feed fallback prices into ClobClient from gamma + WS
                 for market in markets:
@@ -442,7 +475,9 @@ class TradingEngine:
 
                     # Dynamic picker gets balance preferences
                     try:
-                        if hasattr(strategy, 'analyze') and self.active_strategy == 'dynamic':
+                        if self.flip_mode:
+                            signal = await strategy.analyze(market, context)
+                        elif hasattr(strategy, 'analyze') and self.active_strategy == 'dynamic':
                             signal = await strategy.analyze(market, context, balance_prefs)
                         else:
                             signal = await strategy.analyze(market, context)
@@ -500,6 +535,24 @@ class TradingEngine:
                     strat_name = trade.get('strategy', '')
                     if strat_name and hasattr(self.dynamic_picker, 'tracker'):
                         self.dynamic_picker.tracker.record(strat_name, pnl > 0, pnl)
+
+                    # ── Flip mode: track win streak ──
+                    if self.flip_mode and strat_name == 'flip_mode':
+                        if pnl > 0:
+                            self._flip_streak += 1
+                            bal = self.live_balance_mgr.balance
+                            await self.bot.send_message(
+                                f"🔄 FLIP WIN #{self._flip_streak}! "
+                                f"Balance: ${bal:.2f} | "
+                                f"Chain: $1→${2**self._flip_streak}"
+                            )
+                        else:
+                            streak = self._flip_streak
+                            self._flip_streak = 0
+                            await self.bot.send_message(
+                                f"🔄 FLIP LOSS after {streak} wins. "
+                                f"Resetting chain. Balance: ${self.live_balance_mgr.balance:.2f}"
+                            )
 
                 # ── Cleanup stale positions from resolved 5-min markets ──
                 if self.trading_mode == 'live' and hasattr(self.live_trader, 'cleanup_stale_positions'):
