@@ -44,7 +44,10 @@ from trading.live_trader import LiveTrader
 from trading.live_balance_manager import LiveBalanceManager
 from trading.auto_redeem import AutoRedeemer
 from data.reference_price import ReferencePriceEngine
+from data.oracle_ws import BinanceOracleWS
 from strategies.flip_mode import FlipModeStrategy
+from strategies.buy_opposite import BuyOppositeStrategy
+from strategies.last_seconds_scalp import LastSecondsScalpStrategy
 from bot.main import TelegramBot
 
 
@@ -87,8 +90,13 @@ class TradingEngine:
             'straddle': StraddleStrategy(),
             'spread_scalper': SpreadScalper(),
             'mid_sniper': MidPriceSniper(),
+            'buy_opposite': BuyOppositeStrategy(),
+            'last_seconds_scalp': LastSecondsScalpStrategy(),
             'dynamic': self.dynamic_picker,
         }
+
+        # Binance 1s WebSocket for oracle lead detection (augments oracle_arb + last_seconds_scalp)
+        self.oracle_ws = BinanceOracleWS()
         self.active_strategy = 'dynamic'
         self.active_timeframes = list(Config.ENABLED_TIMEFRAMES)
 
@@ -286,7 +294,8 @@ class TradingEngine:
         # Start WebSocket feeds in background
         ws_poly = asyncio.create_task(self._run_poly_feed())
         ws_binance = asyncio.create_task(self.binance_feed.run())
-        self._ws_tasks = [ws_poly, ws_binance]
+        ws_oracle = asyncio.create_task(self.oracle_ws.start())
+        self._ws_tasks = [ws_poly, ws_binance, ws_oracle]
 
         # Start scan loop
         self._scan_task = asyncio.create_task(self._scan_loop())
@@ -300,6 +309,7 @@ class TradingEngine:
             task.cancel()
         await self.poly_feed.stop()
         await self.binance_feed.stop()
+        self.oracle_ws.stop()
         print("⏹️ Trading stopped")
 
     async def _run_poly_feed(self):
@@ -481,6 +491,7 @@ class TradingEngine:
                         'seconds_remaining': seconds_remaining,
                         'balance_mgr': self.live_balance_mgr if self.trading_mode == 'live' else None,
                         'ref_engine': self.ref_engine,
+                        'oracle_ws': self.oracle_ws,
                     }
 
                     # Dynamic picker gets balance preferences

@@ -46,6 +46,8 @@ from strategies.early_mover import EarlyMoverStrategy
 from strategies.quant_strategies import (
     QuantEdgeStrategy, MicroPriceSniperStrategy, InformedFlowDetector
 )
+from strategies.buy_opposite import BuyOppositeStrategy
+from strategies.last_seconds_scalp import LastSecondsScalpStrategy
 
 
 class StrategyTracker:
@@ -185,7 +187,7 @@ class DynamicPicker(BaseStrategy):
     """
 
     name = "dynamic"
-    description = "All 21 strategies — trades continuously, adapts to balance + track record"
+    description = "All 23 strategies — trades continuously, adapts to balance + track record"
 
     def __init__(self):
         self.strategies: List[BaseStrategy] = [
@@ -210,6 +212,8 @@ class DynamicPicker(BaseStrategy):
             QuantEdgeStrategy(),          # Multi-factor quant screening (NEW v2)
             MicroPriceSniperStrategy(),   # MicroPrice divergence plays (NEW v2)
             InformedFlowDetector(),       # Kyle's Lambda whale detection (NEW v2)
+            BuyOppositeStrategy(),        # Contrarian mean-reversion on spikes (NEW v3)
+            LastSecondsScalpStrategy(),   # 3-12s before close Binance lock-in (NEW v3)
         ]
         # Strategy win rate tracker (learns from results)
         self.tracker = StrategyTracker()
@@ -286,6 +290,10 @@ class DynamicPicker(BaseStrategy):
                 s.confidence = min(0.93, s.confidence + 0.10)  # Hidden volume pressure
             elif sig_type == 'informed_flow':
                 s.confidence = min(0.93, s.confidence + 0.10)  # Whale piggyback
+            elif sig_type == 'contrarian_reversion':
+                s.confidence = min(0.93, s.confidence + 0.10)  # Buy-opposite spike fade
+            elif sig_type == 'last_seconds_scalp':
+                s.confidence = min(0.97, s.confidence + 0.18)  # Near-certain info edge
 
             # ── Apply strategy win rate adjustment (learning) ──
             track_adj = self.tracker.get_adjustment(s.strategy)
